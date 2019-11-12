@@ -154,10 +154,19 @@ case class CompletedTxn(producerId: Long, firstOffset: Long, lastOffset: Long, i
  * @param time The time instance used for checking the clock
  * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
  * @param producerIdExpirationCheckIntervalMs How often to check for producer ids which need to be expired
+  *
+  *
+  * Log 类使用 SkipList 数据结构对 LogSegment 进行组织和管理。
+  * 在 SkipList 中以 LogSegment 的 baseOffset 为 key，以 LogSegment 对象自身作为 value。
+  *
+  * 当读取消息数据时，我们可以以 offset 快速定位到对应的 LogSegment 对象，然后调用 LogSegment#read
+  * 方法读取消息数据。当写入消息时，Kafka 并不允许向 SkipList 中的任意一个 LogSegment
+  * 对象追加数据，而只允许往 SkipList 中的最后一个 LogSegment 追加数据，Log 类提供了 Log#activeSegment
+  * 用于获取该 LogSegment 对象，称之为 activeSegment。
  */
 @threadsafe
-class Log(@volatile var dir: File,
-          @volatile var config: LogConfig,
+class Log(@volatile var dir: File, // 当前 Log 对象对应的 topic 分区目录
+          @volatile var config: LogConfig, // 配置信息
           @volatile var logStartOffset: Long,
           @volatile var recoveryPoint: Long,
           scheduler: Scheduler,
@@ -180,6 +189,7 @@ class Log(@volatile var dir: File,
   @volatile private var isMemoryMappedBufferClosed = false
 
   /* last time it was flushed */
+  /* 最近一次执行 flush 操作的时间 */
   private val lastFlushedTime = new AtomicLong(time.milliseconds)
 
   def recordVersion: RecordVersion = config.messageFormatVersion.recordVersion
@@ -216,7 +226,10 @@ class Log(@volatile var dir: File,
     if (isMemoryMappedBufferClosed)
       throw new KafkaStorageException(s"The memory mapped buffer for log of $topicPartition is already closed")
   }
-
+  // 用于记录分配给当前消息的 offset，也是当前副本的 LEO 值:
+  // - messageOffset 记录了当前 Log 对象下一条待追加消息的 offset 值
+  // - segmentBaseOffset 记录了 activeSegment 对象的 baseOffset
+  // - relativePositionInSegment 记录了 activeSegment 对象的大小
   @volatile private var nextOffsetMetadata: LogOffsetMetadata = _
 
   /* The earliest offset which is part of an incomplete transaction. This is used to compute the
@@ -240,6 +253,11 @@ class Log(@volatile var dir: File,
   @volatile private var replicaHighWatermark: Option[Long] = None
 
   /* the actual segments of the log */
+  /**
+    * 当前 Log 包含的 LogSegment 集合，SkipList 结构：
+    * - 以 baseOffset 作为 key
+    * - 以 LogSegment 对象作为 value
+    */
   private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
 
   @volatile private var _leaderEpochCache: LeaderEpochFileCache = initializeLeaderEpochCache()
@@ -495,6 +513,15 @@ class Log(@volatile var dir: File,
    * @throws LogSegmentOffsetOverflowException if we encounter a .swap file with messages that overflow index offset; or when
    *                                           we find an unexpected number of .log files with overflow
    */
+  /**
+    * 方法加载对应 topic 分区目录下的 log、index 和 timeindex 文件
+    *
+    * 删除标记为 deleted 或 cleaned 的文件，将标记为 swap 的文件加入到交换集合中，等待后续继续完成交换过程；
+    * 加载 topic 分区目录下全部的 log 文件和 index 文件，如果对应的 index 不存在或数据不完整，则重建；
+    * 遍历处理 1 中记录的 swap 文件，使用压缩后的 LogSegment 替换压缩前的 LogSegment 集合，并删除压缩前的日志和索引文件；
+    * 后处理，如果对应 SkipList 为空则新建一个空的 activeSegment，如果不为空则校验 recoveryPoint 之后数据的完整性。
+    * @return
+    */
   private def loadSegments(): Long = {
     // first do a pass through the files in the log directory and remove any temporary files
     // and find any interrupted swap operations
@@ -797,26 +824,41 @@ class Log(@volatile var dir: File,
    * @throws UnexpectedAppendOffsetException If the first or last offset in append is less than next offset
    * @return Information about the appended messages including the first and last offset.
    */
+  /**
+    * 用于往 Log 对象中追加消息数据。需要注意的一点是，Log 对象使用 SkipList 管理多个 LogSegment，
+    * 我们在执行追加消息时是不能够往 SkipList 中的任意 LogSegment 对象执行追加操作的，
+    * Kafka 设计仅允许往 activeSegment 对象中追加消息
+    * @param records
+    * @param isFromClient
+    * @param assignOffsets
+    * @param leaderEpoch
+    * @return
+    */
   private def append(records: MemoryRecords, isFromClient: Boolean, assignOffsets: Boolean, leaderEpoch: Int): LogAppendInfo = {
     maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+      // 1. 解析、校验待追加的消息数据，封装成 LogAppendInfo 对象
       val appendInfo = analyzeAndValidateRecords(records, isFromClient = isFromClient)
-
+      // 如果消息数据个数为 0，则直接返回
       // return if we have no valid messages or if this is a duplicate of the last appended entry
       if (appendInfo.shallowCount == 0)
         return appendInfo
 
       // trim any invalid bytes or partial messages before appending it to the on-disk log
+      //  剔除待追加消息中未通过验证的字节部分
       var validRecords = trimInvalidBytes(records, appendInfo)
 
       // they are valid, insert them in the log
       lock synchronized {
         checkIfMemoryMappedBufferClosed()
-        if (assignOffsets) {
+        if (assignOffsets) { // 如果指定需要分配 offset
           // assign offsets to the message set
+          // 获取当前 Log 对象对应的最后一个 offset 值，以此开始向后分配 offset
           val offset = new LongRef(nextOffsetMetadata.messageOffset)
+          // 更新待追加消息的 firstOffset 为 Log 对象最后一个 offset 值
           appendInfo.firstOffset = Some(offset.value)
           val now = time.milliseconds
           val validateAndOffsetAssignResult = try {
+            // 对消息（包括压缩后的）的 magic 值进行统一，验证数据完整性，并分配 offset，同时按要求更新消息的时间戳
             LogValidator.validateMessagesAndAssignOffsets(validRecords,
               offset,
               time,
@@ -904,13 +946,14 @@ class Log(@volatile var dir: File,
         }
 
         // maybe roll the log if this segment is full
+        // 获取 activeSegment 对象，如果需要则创建新的 activeSegment 对象
         val segment = maybeRoll(validRecords.sizeInBytes, appendInfo)
 
         val logOffsetMetadata = LogOffsetMetadata(
           messageOffset = appendInfo.firstOrLastOffsetOfFirstBatch,
           segmentBaseOffset = segment.baseOffset,
           relativePositionInSegment = segment.size)
-
+        //  往 activeSegment 中追加消息
         segment.append(largestOffset = appendInfo.lastOffset,
           largestTimestamp = appendInfo.maxTimestamp,
           shallowOffsetOfMaxTimestamp = appendInfo.offsetOfMaxTimestamp,
@@ -922,6 +965,7 @@ class Log(@volatile var dir: File,
         // will be cleaned up after the log directory is recovered. Note that the end offset of the
         // ProducerStateManager will not be updated and the last stable offset will not advance
         // if the append to the transaction index fails.
+        // 更新 LEO 中记录的当前 Log 最后一个 offset 值
         updateLogEndOffset(appendInfo.lastOffset + 1)
 
         // update the producer state
@@ -949,7 +993,7 @@ class Log(@volatile var dir: File,
           s"first offset: ${appendInfo.firstOffset}, " +
           s"next offset: ${nextOffsetMetadata.messageOffset}, " +
           s"and messages: $validRecords")
-
+        // 如果刷盘时间间隔达到阈值（对应 flush.messages 配置），则执行刷盘
         if (unflushedMessages >= config.flushInterval)
           flush()
 

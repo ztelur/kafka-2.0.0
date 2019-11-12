@@ -46,9 +46,9 @@ import scala.collection.mutable.ArrayBuffer
  * A background thread handles log retention by periodically truncating excess log segments.
  */
 @threadsafe
-class LogManager(logDirs: Seq[File],
+class LogManager(logDirs: Seq[File], // log 目录集合，对应 log.dirs 配置，一般选择 log 数目最少的目录进行创建
                  initialOfflineDirs: Seq[File],
-                 val topicConfigs: Map[String, LogConfig], // note that this doesn't get updated after creation
+                 val topicConfigs: Map[String, LogConfig], // topic 相关配置 note that this doesn't get updated after creation
                  val initialDefaultConfig: LogConfig,
                  val cleanerConfig: CleanerConfig,
                  recoveryThreadsPerDataDir: Int,
@@ -257,6 +257,9 @@ class LogManager(logDirs: Seq[File],
 
   private def loadLog(logDir: File, recoveryPoints: Map[TopicPartition, Long], logStartOffsets: Map[TopicPartition, Long]): Unit = {
     debug("Loading log '" + logDir.getName + "'")
+    /**
+      * 依据目录名解析得到对应的 topic 分区对象
+      */
     val topicPartition = Log.parseTopicPartitionName(logDir)
     val config = topicConfigs.getOrElse(topicPartition.topic, currentDefaultConfig)
     val logRecoveryPoint = recoveryPoints.getOrElse(topicPartition, 0L)
@@ -297,28 +300,42 @@ class LogManager(logDirs: Seq[File],
 
   /**
    * Recover and load all logs in the given data directories
+    *
    */
   private def loadLogs(): Unit = {
     info("Loading logs.")
     val startMs = time.milliseconds
+    /**
+      * 用于记录所有 log 目录对应的线程池
+      */
     val threadPools = ArrayBuffer.empty[ExecutorService]
     val offlineDirs = mutable.Set.empty[(String, IOException)]
     val jobs = mutable.Map.empty[File, Seq[Future[_]]]
 
+    /**
+      * 遍历处理每个 log 目录
+      */
     for (dir <- liveLogDirs) {
       try {
+        // 为每个 log 目录创建一个 ioThreads 大小的线程池
         val pool = Executors.newFixedThreadPool(numRecoveryThreadsPerDataDir)
         threadPools.append(pool)
-
+        // 尝试获取 .kafka_cleanshutdown 文件，如果该文件存在则说明 broker 节点是正常关闭的
         val cleanShutdownFile = new File(dir, Log.CleanShutdownFile)
 
         if (cleanShutdownFile.exists) {
           debug(s"Found clean shutdown file. Skipping recovery for all logs in data directory: ${dir.getAbsolutePath}")
         } else {
           // log recovery itself is being performed by `Log` class during initialization
+          /**
+            * 当前 broker 不是正常关闭，设置 broker 状态为 RecoveringFromUncleanShutdown，
+            * 表示正在从上次异常关闭中恢复
+            */
           brokerState.newState(RecoveringFromUncleanShutdown)
         }
-
+        /**
+          * 读取每个 log 目录下的 recovery-point-offset-checkpoint 文件，返回 topic 分区对象与 HW 之间的映射关系
+          */
         var recoveryPoints = Map[TopicPartition, Long]()
         try {
           recoveryPoints = this.recoveryPointCheckpoints(dir).read
@@ -335,11 +352,16 @@ class LogManager(logDirs: Seq[File],
           case e: Exception =>
             warn("Error occurred while reading log-start-offset-checkpoint file of directory " + dir, e)
         }
-
+        /**
+          * 历当前 log 目录的子目录，仅处理目录，忽略文件
+          */
         val jobsForDir = for {
           dirContent <- Option(dir.listFiles).toList
           logDir <- dirContent if logDir.isDirectory
         } yield {
+          /**
+            * 为每个 Log 目录创建一个 Runnable 任务
+            */
           CoreUtils.runnable {
             try {
               loadLog(logDir, recoveryPoints, logStartOffsets)

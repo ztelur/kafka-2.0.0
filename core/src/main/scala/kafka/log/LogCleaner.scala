@@ -87,6 +87,9 @@ import scala.collection.{Set, mutable}
  * @param logDirs The directories where offset checkpoints reside
  * @param logs The pool of logs
  * @param time A way to control the passage of time
+  *
+  * LogManager 是 kafka 日志数据操作的入口，基于上一节分析的 Log 类对象提供了对日志数据的
+  *             加载、创建、删除，以及查询等功能
  */
 class LogCleaner(initialConfig: CleanerConfig,
                  val logDirs: Seq[File],
