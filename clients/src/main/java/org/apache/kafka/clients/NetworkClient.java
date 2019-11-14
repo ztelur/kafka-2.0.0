@@ -762,6 +762,12 @@ public class NetworkClient implements KafkaClient {
      * @param responses The list of responses to update
      * @param now The current time
      */
+    /**
+     * 缓存在 inFlightRequests 中已经超时的相关请求对应的节点集合，针对此类节点将其视作断开连接进行处理
+     *
+     * @param responses
+     * @param now
+     */
     private void handleTimedOutRequests(List<ClientResponse> responses, long now) {
         List<String> nodeIds = this.inFlightRequests.nodesWithTimedOutRequests(now);
         for (String nodeId : nodeIds) {

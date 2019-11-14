@@ -217,6 +217,13 @@ public final class ProducerBatch {
      * @param exception The exception that occurred (or null if the request was successful)
      * @return true if the batch was completed successfully and false if the batch was previously aborted
      */
+    /**
+     * 结束本次发送消息的过程，并将响应结果传递给用户，同时释放 RecordBatch 占用的空间
+     * @param baseOffset
+     * @param logAppendTime
+     * @param exception
+     * @return
+     */
     public boolean done(long baseOffset, long logAppendTime, RuntimeException exception) {
         final FinalState finalState;
         if (exception == null) {
@@ -226,7 +233,9 @@ public final class ProducerBatch {
             log.trace("Failed to produce messages to {}.", topicPartition, exception);
             finalState = FinalState.FAILED;
         }
-
+        /**
+         * 标识当前 RecordBatch 已经处理完成
+         */
         if (!this.finalState.compareAndSet(null, finalState)) {
             if (this.finalState.get() == FinalState.ABORTED) {
                 log.debug("ProduceResponse returned for {} after batch had already been aborted.", topicPartition);
@@ -242,15 +251,30 @@ public final class ProducerBatch {
 
     private void completeFutureAndFireCallbacks(long baseOffset, long logAppendTime, RuntimeException exception) {
         // Set the future before invoking the callbacks as we rely on its state for the `onCompletion` call
+        /**
+         * 设置当前 RecordBatch 发送之后的状态
+         */
         produceFuture.set(baseOffset, logAppendTime, exception);
 
         // execute callbacks
+        /**
+         * 循环执行每个消息的 Callback 回调
+         */
         for (Thunk thunk : thunks) {
             try {
+                /**
+                 * 消息处理正常
+                 */
                 if (exception == null) {
+                    /**
+                     * ecordMetadata 是服务端返回的
+                     */
                     RecordMetadata metadata = thunk.future.value();
                     if (thunk.callback != null)
                         thunk.callback.onCompletion(metadata, null);
+                    /**
+                     *  消息处理异常
+                     */
                 } else {
                     if (thunk.callback != null)
                         thunk.callback.onCompletion(null, exception);
@@ -259,7 +283,9 @@ public final class ProducerBatch {
                 log.error("Error executing user-provided callback on message for topic-partition '{}'", topicPartition, e);
             }
         }
-
+        /**
+         * 标记本次请求已经完成（正常响应、超时，以及关闭生产者）
+         */
         produceFuture.done();
     }
 

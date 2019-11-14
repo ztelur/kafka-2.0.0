@@ -574,6 +574,11 @@ public class Sender implements Runnable {
             this.accumulator.deallocate(batch);
             this.sensors.recordBatchSplit();
         } else if (error != Errors.NONE) {
+            /**
+             *         /**
+             *          * 异常响应，但是允许重试
+             *          */
+             */
             if (canRetry(batch, response)) {
                 log.warn("Got error produce response with correlation id {} on topic-partition {}, retrying ({} attempts left). Error: {}",
                         correlationId,
@@ -581,6 +586,9 @@ public class Sender implements Runnable {
                         this.retries - batch.attempts() - 1,
                         error);
                 if (transactionManager == null) {
+                    /**
+                     * 将消息重新添加到收集器中，等待再次发送
+                     */
                     reenqueueBatch(batch, now);
                 } else if (transactionManager.hasProducerIdAndEpoch(batch.producerId(), batch.producerEpoch())) {
                     // If idempotence is enabled only retry the request if the current producer id is the same as
@@ -601,18 +609,26 @@ public class Sender implements Runnable {
                 // The only thing we can do is to return success to the user and not return a valid offset and timestamp.
                 completeBatch(batch, response);
             } else {
+                /**
+                 *  正常响应，或不允许重试的异常
+                 */
                 final RuntimeException exception;
                 if (error == Errors.TOPIC_AUTHORIZATION_FAILED)
+                    // 权限认证失败
                     exception = new TopicAuthorizationException(batch.topicPartition.topic());
                 else if (error == Errors.CLUSTER_AUTHORIZATION_FAILED)
                     exception = new ClusterAuthorizationException("The producer is not authorized to do idempotent sends");
                 else
+                    // 其他异常，如果是正常响应，则为 null
                     exception = error.exception();
                 // tell the user the result of their request. We only adjust sequence numbers if the batch didn't exhaust
                 // its retries -- if it did, we don't know whether the sequence number was accepted or not, and
                 // thus it is not safe to reassign the sequence.
                 failBatch(batch, response, exception, batch.attempts() < this.retries);
             }
+            /**
+             * 如果是集群元数据异常，则标记需要更新集群元数据信息
+             */
             if (error.exception() instanceof InvalidMetadataException) {
                 if (error.exception() instanceof UnknownTopicOrPartitionException) {
                     log.warn("Received unknown topic or partition error in produce request on partition {}. The " +
@@ -627,7 +643,9 @@ public class Sender implements Runnable {
         } else {
             completeBatch(batch, response);
         }
-
+        /**
+         * 释放已经处理完成的 topic 分区，对于需要保证消息强顺序性，以允许接收下一条消息
+         */
         // Unmute the completed partition.
         if (guaranteeMessageOrder)
             this.accumulator.unmutePartition(batch.topicPartition, throttleUntilTimeMs);
