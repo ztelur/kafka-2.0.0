@@ -58,22 +58,56 @@ public final class ProducerBatch {
 
     private enum FinalState { ABORTED, FAILED, SUCCEEDED }
 
+    /**
+     * 当前 RecordBatch 创建的时间戳
+     */
     final long createdMs;
+    /**
+     * 当前缓存的消息的目标 topic 分区
+     */
     final TopicPartition topicPartition;
+    /**
+     * 标识当前 RecordBatch 发送之后的状态
+     */
     final ProduceRequestResult produceFuture;
-
+    /**
+     * 消息的 Callback 队列，每个消息都对应一个 Callback 对象
+     */
     private final List<Thunk> thunks = new ArrayList<>();
+    /**
+     * 用来存储数据的 {@link MemoryRecords} 对应的 builder 对象
+     */
     private final MemoryRecordsBuilder recordsBuilder;
+    /**
+     * 发送当前 RecordBatch 的重试次数
+     */
     private final AtomicInteger attempts = new AtomicInteger(0);
     private final boolean isSplitBatch;
     private final AtomicReference<FinalState> finalState = new AtomicReference<>(null);
-
+    /**
+     * 记录保存的 record 个数
+     */
     int recordCount;
+    /**
+     * 记录最大的 record 字节数
+     */
     int maxRecordSize;
+    /**
+     * 最后一次重试发送的时间戳
+     */
     private long lastAttemptMs;
+    /**
+     * 追后一次向当前 RecordBatch 追加消息的时间戳
+     */
     private long lastAppendTime;
+    /**
+     * 记录上次投递当前 BatchRecord 的时间戳
+     */
     private long drainedMs;
     private String expiryErrorMessage;
+    /**
+     * 标记是否正在重试
+     */
     private boolean retry;
     private boolean reopened = false;
 
@@ -101,12 +135,27 @@ public final class ProducerBatch {
      * @return The RecordSend corresponding to this record or null if there isn't sufficient room.
      */
     public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
+        /**
+         * 检测是否还有多余的空间容纳该消息
+         */
         if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
+            /**
+             * 没有多余的空间则直接返回，后面会尝试申请新的空间
+             */
             return null;
         } else {
+            /**
+             * 添加当前消息到 MemoryRecords，并返回消息对应的 CRC32 校验码
+             */
             Long checksum = this.recordsBuilder.append(timestamp, key, value, headers);
+            /**
+             * 更新最大 record 字节数
+             */
             this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
                     recordsBuilder.compressionType(), key, value, headers));
+            /**
+             * 更新最后一次追加记录时间戳
+             */
             this.lastAppendTime = now;
             FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount,
                                                                    timestamp, checksum,
@@ -114,6 +163,9 @@ public final class ProducerBatch {
                                                                    value == null ? -1 : value.length);
             // we have to keep every future returned to the users in case the batch needs to be
             // split to several new batches and resent.
+            /**
+             * 如果指定了 Callback，将 Callback 和 FutureRecordMetadata 封装到 Trunk 中
+             */
             thunks.add(new Thunk(callback, future));
             this.recordCount++;
             return future;

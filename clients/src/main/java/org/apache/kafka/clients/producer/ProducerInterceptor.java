@@ -34,6 +34,12 @@ import org.apache.kafka.common.Configurable;
  * <p>
  * Implement {@link org.apache.kafka.common.ClusterResourceListener} to receive cluster metadata once it's available. Please see the class documentation for ClusterResourceListener for more information.
  */
+
+/**
+ * 我们可以基于该拦截器机制实现对消息的剔除、修改，以及在响应回调之前增加一些定制化的需求等
+ * @param <K>
+ * @param <V>
+ */
 public interface ProducerInterceptor<K, V> extends Configurable {
     /**
      * This is called from {@link org.apache.kafka.clients.producer.KafkaProducer#send(ProducerRecord)} and
@@ -64,6 +70,12 @@ public interface ProducerInterceptor<K, V> extends Configurable {
      * @param record the record from client or the record returned by the previous interceptor in the chain of interceptors.
      * @return producer record to send to topic/partition
      */
+    /**
+     * 用于对待发送的消息进行前置拦截，具体的拦截时机是在
+     * 消息被序列化和分配分区（如果未手动指定分区）之前
+     * @param record
+     * @return
+     */
     public ProducerRecord<K, V> onSend(ProducerRecord<K, V> record);
 
     /**
@@ -85,6 +97,14 @@ public interface ProducerInterceptor<K, V> extends Configurable {
      *                 The metadata may be null if the client passed null record to
      *                 {@link org.apache.kafka.clients.producer.KafkaProducer#send(ProducerRecord)}.
      * @param exception The exception thrown during processing of this record. Null if no error occurred.
+     */
+    /**
+     * 用于对已发送到 kafka 集群并得到确认的消息，以及发送失败的消息进行后置拦截，
+     * 具体的拦截时机是在回调用户自定义的 Callback 逻辑之前
+     *
+     * Producer 的 I/O 线程中被调用，所以不建议在其中实现一些比较耗时的逻辑，以便影响整体消息发送的性能
+     * @param metadata
+     * @param exception
      */
     public void onAcknowledgement(RecordMetadata metadata, Exception exception);
 

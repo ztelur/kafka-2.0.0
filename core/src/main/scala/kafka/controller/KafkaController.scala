@@ -54,6 +54,16 @@ object KafkaController extends Logging {
 
 }
 
+/**
+  *
+  * @param config 配置类信息
+  * @param zkClient ZK交互工具
+  * @param time 时间戳工具类
+  * @param metrics
+  * @param initialBrokerInfo
+  * @param tokenManager
+  * @param threadNamePrefix
+  */
 class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Time, metrics: Metrics, initialBrokerInfo: BrokerInfo,
                       tokenManager: DelegationTokenManager, threadNamePrefix: Option[String] = None) extends Logging with KafkaMetricsGroup {
 
@@ -62,6 +72,9 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
   @volatile private var brokerInfo = initialBrokerInfo
 
   private val stateChangeLogger = new StateChangeLogger(config.brokerId, inControllerContext = true, None)
+  /**
+    * 维护上下文信息，缓存 ZK 中记录的整个集群的元数据信息
+    */
   val controllerContext = new ControllerContext
 
   // have a separate scheduler for the controller to be able to start and stop independently of the kafka server
@@ -74,7 +87,13 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
 
   val topicDeletionManager = new TopicDeletionManager(this, eventManager, zkClient)
   private val brokerRequestBatch = new ControllerBrokerRequestBatch(this, stateChangeLogger)
+  /**
+    * 管理集群中所有副本状态的状态机
+    */
   val replicaStateMachine = new ReplicaStateMachine(config, stateChangeLogger, controllerContext, topicDeletionManager, zkClient, mutable.Map.empty, new ControllerBrokerRequestBatch(this, stateChangeLogger))
+  /**
+    * 管理集群中所有分区状态的状态机
+    */
   val partitionStateMachine = new PartitionStateMachine(config, stateChangeLogger, controllerContext, topicDeletionManager, zkClient, mutable.Map.empty, new ControllerBrokerRequestBatch(this, stateChangeLogger))
 
   private val controllerChangeHandler = new ControllerChangeHandler(this, eventManager)
@@ -150,8 +169,11 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
    * Invoked when the controller module of a Kafka server is started up. This does not assume that the current broker
    * is the controller. It merely registers the session expiration listener and starts the controller leader
    * elector
+    * 在 kafka 服务启动时，每个 broker 节点都会创建对应的 Kafka Controller 实例
+    * 然后调用该函数
    */
   def startup() = {
+    // 注册 SessionExpirationListener 监听器，监听 Controller 与 ZK 的连接状态
     zkClient.registerStateChangeHandler(new StateChangeHandler {
       override val name: String = StateChangeHandlers.ControllerHandler
       override def afterInitializingSession(): Unit = {
@@ -166,7 +188,9 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
         expireEvent.waitUntilProcessingStarted()
       }
     })
+    // 标识当前 controller 已经启动，现在还是 follower 角色
     eventManager.put(Startup)
+    // 启动故障转移机制
     eventManager.start()
   }
 

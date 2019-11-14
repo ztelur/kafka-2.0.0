@@ -52,10 +52,25 @@ public class DefaultPartitioner implements Partitioner {
      * @param cluster The current cluster metadata
      */
     public int partition(String topic, Object key, byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster) {
+        /**
+         * 获取当前 topic 的分区详细信息
+         */
         List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
+        /**
+         * 获取当前 topic 对应的分区数
+         */
         int numPartitions = partitions.size();
+        /**
+         * 如果没有设置 key，则基于轮询算法
+         */
         if (keyBytes == null) {
+            /**
+             * 获取当前 topic 对应的上次位置值加 1，如果是第一次则随机生成一个
+             */
             int nextValue = nextValue(topic);
+            /**
+             * 获取当前 topic 包含 leader 副本的分区详细信息
+             */
             List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
             if (availablePartitions.size() > 0) {
                 int part = Utils.toPositive(nextValue) % availablePartitions.size();
@@ -65,6 +80,9 @@ public class DefaultPartitioner implements Partitioner {
                 return Utils.toPositive(nextValue) % numPartitions;
             }
         } else {
+            /**
+             * 如果指定了 key，则使用 murmur2 算法对 key 做哈希取模
+             */
             // hash the keyBytes to choose a partition
             return Utils.toPositive(Utils.murmur2(keyBytes)) % numPartitions;
         }

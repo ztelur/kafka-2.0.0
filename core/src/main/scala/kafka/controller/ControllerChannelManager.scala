@@ -40,7 +40,9 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.HashMap
 import scala.collection.{Set, mutable}
 
-
+/**
+  * 该类用于建立到集群中所有 broker 节点的连接，并与之通信
+  */
 object ControllerChannelManager {
   val QueueSizeMetricName = "QueueSize"
   val RequestRateAndQueueTimeMetricName = "RequestRateAndQueueTimeMs"
@@ -89,6 +91,10 @@ class ControllerChannelManager(controllerContext: ControllerContext, config: Kaf
     }
   }
 
+  /**
+    * 类在被实例化时会调用,会调用该函数
+    * @param broker
+    */
   def addBroker(broker: Broker) {
     // be careful here. Maybe the startup() API has already started the request send thread
     brokerLock synchronized {
@@ -106,10 +112,12 @@ class ControllerChannelManager(controllerContext: ControllerContext, config: Kaf
   }
 
   private def addNewBroker(broker: Broker) {
+    // 创建消息队列，用于存放发往指定 broker 节点的请求
     val messageQueue = new LinkedBlockingQueue[QueueItem]
     debug(s"Controller ${config.brokerId} trying to connect to broker ${broker.id}")
     val brokerNode = broker.node(config.interBrokerListenerName)
     val logContext = new LogContext(s"[Controller id=${config.brokerId}, targetBrokerId=${brokerNode.idString}] ")
+    // 创建网络连接客户端
     val networkClient = {
       val channelBuilder = ChannelBuilders.clientChannelBuilder(
         config.interBrokerSecurityProtocol,
@@ -146,6 +154,7 @@ class ControllerChannelManager(controllerContext: ControllerContext, config: Kaf
         logContext
       )
     }
+    // 创建请求发送线程对象
     val threadName = threadNamePrefix match {
       case None => s"Controller-${config.brokerId}-to-broker-${broker.id}-send-thread"
       case Some(name) => s"$name:Controller-${config.brokerId}-to-broker-${broker.id}-send-thread"
@@ -166,7 +175,7 @@ class ControllerChannelManager(controllerContext: ControllerContext, config: Kaf
       },
       brokerMetricTags(broker.id)
     )
-
+    // 记录到 brokerStateInfo 集合
     brokerStateInfo.put(broker.id, ControllerBrokerStateInfo(networkClient, brokerNode, messageQueue,
       requestThread, queueSizeGauge, requestRateAndQueueTimeMetrics))
   }

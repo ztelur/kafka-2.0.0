@@ -45,12 +45,29 @@ import org.apache.kafka.common.header.internals.RecordHeaders;
  * {@link RecordMetadata}
  */
 public class ProducerRecord<K, V> {
-
+    /**
+     * 主题
+     */
     private final String topic;
+    /**
+     * 分区
+     */
     private final Integer partition;
+    /**
+     * 消息头
+     */
     private final Headers headers;
+    /**
+     * 消息对应的key
+     */
     private final K key;
+    /**
+     * 消息值
+     */
     private final V value;
+    /**
+     * 时间戳
+     */
     private final Long timestamp;
 
     /**

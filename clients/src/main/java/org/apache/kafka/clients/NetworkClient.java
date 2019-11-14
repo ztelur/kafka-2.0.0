@@ -507,6 +507,9 @@ public class NetworkClient implements KafkaClient {
      * @return The list of responses received
      */
     @Override
+    /**
+     *
+     */
     public List<ClientResponse> poll(long timeout, long now) {
         ensureActive();
 
@@ -518,31 +521,64 @@ public class NetworkClient implements KafkaClient {
             completeResponses(responses);
             return responses;
         }
-
+        /**
+         * 如果距离上次更新超过指定时间，且存在负载小的目标节点，
+         * 则创建 MetadataRequest 请求更新本地缓存的集群元数据信息，并在下次执行 poll 操作时一并送出
+         */
         long metadataTimeout = metadataUpdater.maybeUpdate(now);
+        /**
+         * 发送网络请求
+         */
         try {
             this.selector.poll(Utils.min(timeout, metadataTimeout, defaultRequestTimeoutMs));
         } catch (IOException e) {
             log.error("Unexpected error during I/O", e);
         }
-
+        /**
+         * 处理服务端响应
+         */
         // process completed actions
         long updatedNow = this.time.milliseconds();
         List<ClientResponse> responses = new ArrayList<>();
+        /**
+         *  对于发送成功且不期望服务端响应的请求，创建本地的响应对象添加到 responses 队列中
+         */
         handleCompletedSends(responses, updatedNow);
+        /**
+         * 获取并解析服务端响应
+         *      * - 如果是更新集群元数据对应的响应，则更新本地缓存的集群元数据信息
+         *      * - 如果是更新 API 版本的响应，则更新本地缓存的目标节点支持的 API 版本信息
+         *      * - 否则，获取 ClientResponse 添加到 responses 队列中
+         */
         handleCompletedReceives(responses, updatedNow);
+        /**
+         * 处理连接断开的请求，构建对应的 ClientResponse 添加到 responses 列表中，并标记需要更新集群元数据信息
+         */
         handleDisconnections(responses, updatedNow);
         handleConnections();
+        /**
+         * 如果需要更新本地的 API 版本信息，则创建对应的 ApiVersionsRequest 请求，并在下次执行 poll 操作时一并送出
+         */
         handleInitiateApiVersionRequests(updatedNow);
+        /**
+         * 遍历获取 inFlightRequests 中的超时请求，构建对应的 ClientResponse 添加到 responses 列表中，并标记需要更新集群元数据信息
+         */
         handleTimedOutRequests(responses, updatedNow);
+        /**
+         * 遍历处理响应对应的 onComplete 方法
+         */
         completeResponses(responses);
 
         return responses;
     }
 
     private void completeResponses(List<ClientResponse> responses) {
+
         for (ClientResponse response : responses) {
             try {
+                /**
+                 * 本质上就是在调用注册的 RequestCompletionHandler#onComplete 方法
+                 */
                 response.onComplete();
             } catch (Exception e) {
                 log.error("Uncaught error in request completion:", e);
@@ -754,9 +790,21 @@ public class NetworkClient implements KafkaClient {
     private void handleCompletedSends(List<ClientResponse> responses, long now) {
         // if no response is expected then when the send is completed, return it
         for (Send send : this.selector.completedSends()) {
+            /**
+             * 获取缓存到 inFlightRequests 集合中的请求对象
+             */
             InFlightRequest request = this.inFlightRequests.lastSent(send.destination());
+            /**
+             * 检测请求是否期望响应
+             */
             if (!request.expectResponse) {
+                /**
+                 * 当前请求不期望服务端响应，则从 inFlightRequests 集合中删除
+                 */
                 this.inFlightRequests.completeLastSent(send.destination());
+                /**
+                 * 为当前请求生成 ClientResponse 对象
+                 */
                 responses.add(request.completed(null, now));
             }
         }
@@ -788,8 +836,15 @@ public class NetworkClient implements KafkaClient {
      */
     private void handleCompletedReceives(List<ClientResponse> responses, long now) {
         for (NetworkReceive receive : this.selector.completedReceives()) {
+            // 获取返回响应的节点 ID
             String source = receive.source();
+            /**
+             * 从 inFlightRequests 集合中获取缓存的 ClientRequest 对象
+             */
             InFlightRequest req = inFlightRequests.completeNext(source);
+            /**
+             * 解析响应
+             */
             Struct responseStruct = parseStructMaybeUpdateThrottleTimeMetrics(receive.payload(), req.header,
                 throttleTimeSensor, now);
             if (log.isTraceEnabled()) {
@@ -800,10 +855,16 @@ public class NetworkClient implements KafkaClient {
             AbstractResponse body = AbstractResponse.parseResponse(req.header.apiKey(), responseStruct);
             maybeThrottle(body, req.header.apiVersion(), req.destination, now);
             if (req.isInternalRequest && body instanceof MetadataResponse)
+            /**
+             * 如果是更新集群元数据对应的响应，则更新本地的缓存的集群元数据信息
+             */
                 metadataUpdater.handleCompletedMetadataResponse(req.header, now, (MetadataResponse) body);
             else if (req.isInternalRequest && body instanceof ApiVersionsResponse)
                 handleApiVersionsResponse(responses, req, now, (ApiVersionsResponse) body);
             else
+            /**
+             * 否则，获取 ClientResponse 响应对象添加到队列中
+             */
                 responses.add(req.completed(body, now));
         }
     }

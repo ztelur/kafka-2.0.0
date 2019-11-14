@@ -56,21 +56,53 @@ public final class Metadata implements Closeable {
 
     public static final long TOPIC_EXPIRY_MS = 5 * 60 * 1000;
     private static final long TOPIC_EXPIRY_NEEDS_UPDATE = -1L;
-
+    /**
+     * 元数据最小更新时间间隔，默认是 100 毫秒，防止更新太频繁
+     */
     private final long refreshBackoffMs;
+    /**
+     * 元数据更新时间间隔，默认为 5 分钟
+     */
     private final long metadataExpireMs;
+    /**
+     * 元数据版本号，每更新成功一次则版本号加 1
+     */
     private int version;
+    /**
+     * 上一次更新元数据的时间戳，不管成功还是失败
+     */
     private long lastRefreshMs;
+    /**
+     * 上一次成功更新元数据的时间戳
+     */
     private long lastSuccessfulRefreshMs;
     private AuthenticationException authenticationException;
+    /**
+     * 集群信息
+     */
     private Cluster cluster;
+    /**
+     * 标记是否需要更新集群元数据信息
+     */
     private boolean needUpdate;
     /* Topics with expiry time */
+    /**
+     * 记录集群中所有的 topic 信息，key 是 topic，value 是 topic 过期的时间戳
+     */
     private final Map<String, Long> topics;
+    /**
+     * 元数据更新监听器
+     */
     private final List<Listener> listeners;
     private final ClusterResourceListeners clusterResourceListeners;
+    /**
+     * 标记是否需要更新所有 topic 的元数据信息，一般只更新当前用到的 topic 的元数据信息
+     */
     private boolean needMetadataForAllTopics;
     private final boolean allowAutoTopicCreation;
+    /**
+     * 是否允许 topic 过期
+     */
     private final boolean topicExpiryEnabled;
     private boolean isClosed;
 
