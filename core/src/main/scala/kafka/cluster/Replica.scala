@@ -27,15 +27,26 @@ import org.apache.kafka.common.record.RecordVersion
 import org.apache.kafka.common.requests.EpochEndOffset
 import org.apache.kafka.common.utils.Time
 
-class Replica(val brokerId: Int,
-              val topicPartition: TopicPartition,
-              time: Time = Time.SYSTEM,
-              initialHighWatermarkValue: Long = 0L,
-              @volatile var log: Option[Log] = None) extends Logging {
+class Replica(val brokerId: Int, // 当前副本所在的 broker 的 ID
+              val topicPartition: TopicPartition, // 当前副本所属的 topic 分区对象
+              time: Time = Time.SYSTEM, // 时间戳工具
+              initialHighWatermarkValue: Long = 0L, // 初始 HW 值
+              @volatile var log: Option[Log] = None)  // 当前副本所属的 Log 对象，如果是远程副本，该字段为空，通过该字段可以区分是本地副本还是远程副本
+  extends Logging {
+  /**
+    * 记录副本的 HW 值，消费者只能读取 HW 之前的消息，之后的消息对消费者不可见，
+    * 由 leader 副本维护，当消息被 ISR 集合中所有副本成功同步时更新该字段。
+    */
   // the high watermark offset value, in non-leader replicas only its message offsets are kept
   @volatile private[this] var highWatermarkMetadata = new LogOffsetMetadata(initialHighWatermarkValue)
   // the log end offset value, kept in all replicas;
   // for local replica it is the log's end offset, for remote replicas its value is only updated by follower fetch
+  /**
+    * 记录副本所属 Log 对象最后一条消息的 offset 值：
+    * - 如果是本地副本，可以直接从 Log#nextOffsetMetadata 字段中获取；
+    * - 如果是远程副本，则由其它 broker 发送请求来更新该值。
+    *
+    */
   @volatile private[this] var logEndOffsetMetadata = LogOffsetMetadata.UnknownOffsetMetadata
   // the log start offset value, kept in all replicas;
   // for local replica it is the log's start offset, for remote replicas its value is only updated by follower fetch
@@ -43,14 +54,23 @@ class Replica(val brokerId: Int,
 
   // The log end offset value at the time the leader received the last FetchRequest from this follower
   // This is used to determine the lastCaughtUpTimeMs of the follower
+  /**
+    * 缓存上次从 leader 拉取消息时 leader 副本的 LEO 值
+    */
   @volatile private[this] var lastFetchLeaderLogEndOffset = 0L
 
   // The time when the leader received the last FetchRequest from this follower
   // This is used to determine the lastCaughtUpTimeMs of the follower
+  /**
+    * 记录上次从 leader 拉取消息的时间戳
+    */
   @volatile private[this] var lastFetchTimeMs = 0L
 
   // lastCaughtUpTimeMs is the largest time t such that the offset of most recent FetchRequest from this follower >=
   // the LEO of leader at time t. This is used to determine the lag of this follower and ISR of this partition.
+  /**
+    * 记录当前 follower 从 leader 拉取消息的最近一次时间戳，用于标识当前 follower 滞后 leader 的程度
+    */
   @volatile private[this] var _lastCaughtUpTimeMs = 0L
 
   def isLocal: Boolean = log.isDefined
@@ -88,15 +108,34 @@ class Replica(val brokerId: Int,
    * fetch request is always smaller than the leader's LEO, which can happen if small produce requests are received at
    * high frequency.
    */
+  /**
+    * 维护 LEO 和 HW 值
+    * @param logReadResult
+    */
   def updateLogReadResult(logReadResult: LogReadResult) {
+    /**
+      * 更新 _lastCaughtUpTimeMs 值，记录了 follower 从 leader 拉取消息的最新时间
+      */
     if (logReadResult.info.fetchOffsetMetadata.messageOffset >= logReadResult.leaderLogEndOffset)
       _lastCaughtUpTimeMs = math.max(_lastCaughtUpTimeMs, logReadResult.fetchTimeMs)
     else if (logReadResult.info.fetchOffsetMetadata.messageOffset >= lastFetchLeaderLogEndOffset)
       _lastCaughtUpTimeMs = math.max(_lastCaughtUpTimeMs, lastFetchTimeMs)
 
+    /**
+      * 如果当前副本是远程副本，则更新当前副本的 LEO 值
+      */
     logStartOffset = logReadResult.followerLogStartOffset
+
+    /**
+      * 更新本地记录的从 leader 拉取消息时 leader 副本的 LEO 值
+      */
     logEndOffset = logReadResult.info.fetchOffsetMetadata
+
     lastFetchLeaderLogEndOffset = logReadResult.leaderLogEndOffset
+
+    /**
+      * 更新本地记录的从 leader 拉取消息的时间戳
+      */
     lastFetchTimeMs = logReadResult.fetchTimeMs
   }
 
@@ -152,8 +191,15 @@ class Replica(val brokerId: Int,
     else
       _logStartOffset
 
+  /**
+    * 更新本地副本的 HW 值，因为远程副本所在的 broker 节点仅维护副本的 LEO 位置信息
+    * @param newHighWatermark
+    */
   def highWatermark_=(newHighWatermark: LogOffsetMetadata) {
     if (isLocal) {
+      /**
+        * 如果是本地副本，则更新对应的 HW 值
+        */
       if (newHighWatermark.messageOffset < 0)
         throw new IllegalArgumentException("High watermark offset should be non-negative")
 

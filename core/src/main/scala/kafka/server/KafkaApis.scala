@@ -102,9 +102,18 @@ class KafkaApis(val requestChannel: RequestChannel,
     try {
       trace(s"Handling request:${request.requestDesc(true)} from connection ${request.context.connectionId};" +
         s"securityProtocol:${request.context.securityProtocol},principal:${request.context.principal}")
+
+      /**
+        * 依据请求类型分发请求
+        */
       request.header.apiKey match {
+        /**
+          * 处理 ProduceRequest 请求
+          */
         case ApiKeys.PRODUCE => handleProduceRequest(request)
+        // 处理 FetchRequest 请求
         case ApiKeys.FETCH => handleFetchRequest(request)
+        // 处理 ListOffsetRequest 请求
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
         case ApiKeys.LEADER_AND_ISR => handleLeaderAndIsrRequest(request)
@@ -379,11 +388,20 @@ class KafkaApis(val requestChannel: RequestChannel,
 
   /**
    * Handle a produce request
+    *
+    * 处理生成消息的请求
    */
   def handleProduceRequest(request: RequestChannel.Request) {
+    /**
+      * 将Request转成ProducerRequest并且计算整个消息的长度
+      */
     val produceRequest = request.body[ProduceRequest]
+
     val numBytesAppended = request.header.toStruct.sizeOf + request.sizeOfBodyInBytes
 
+    /**
+      * 对请求进行authroize
+      */
     if (produceRequest.hasTransactionalRecords) {
       val isAuthorizedTransactional = produceRequest.transactionalId != null &&
         authorize(request.session, Write, Resource(TransactionalId, produceRequest.transactionalId, LITERAL))
@@ -397,17 +415,37 @@ class KafkaApis(val requestChannel: RequestChannel,
       sendErrorResponseMaybeThrottle(request, Errors.CLUSTER_AUTHORIZATION_FAILED.exception)
       return
     }
-
+    /**
+      * 创建三个map
+      */
+    // 未授权topic的response
     val unauthorizedTopicResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    // 不存在topic的response
     val nonExistingTopicResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    // 无效请求的response
     val authorizedRequestInfo = mutable.Map[TopicPartition, MemoryRecords]()
 
+    /**
+      * 迭代produceRequest的partitionRecords
+      */
     for ((topicPartition, memoryRecords) <- produceRequest.partitionRecordsOrFail.asScala) {
       if (!authorize(request.session, Write, Resource(Topic, topicPartition.topic, LITERAL)))
+
+      /**
+        * 如果判断topic未授权，生成未授权topic的response
+        */
         unauthorizedTopicResponses += topicPartition -> new PartitionResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
       else if (!metadataCache.contains(topicPartition))
+
+      /**
+        * 如果判断broker的元数据缓存不包含该topicPartition，生成不存在topic的response
+        */
         nonExistingTopicResponses += topicPartition -> new PartitionResponse(Errors.UNKNOWN_TOPIC_OR_PARTITION)
       else
+
+      /**
+        * 如果brocker的元数据缓存包含该topicPartition，将该二元组添加到authorizedRequestInfo的map集合
+        */
         authorizedRequestInfo += (topicPartition -> memoryRecords)
     }
 
@@ -480,6 +518,9 @@ class KafkaApis(val requestChannel: RequestChannel,
     else {
       val internalTopicsAllowed = request.header.clientId == AdminUtils.AdminClientId
 
+      /**
+        * 这里真正进行了处理
+        */
       // call the replica manager to append messages to the replicas
       replicaManager.appendRecords(
         timeout = produceRequest.timeout.toLong,

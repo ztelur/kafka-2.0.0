@@ -779,8 +779,15 @@ private[kafka] class Processor(val id: Int,
             handleChannelMuteEvent(channelId, ChannelMuteEvent.RESPONSE_SENT)
             tryUnmuteChannel(channelId)
 
+          /**
+            * 当前响应需要发送给请求方
+            */
           case response: SendResponse =>
             sendResponse(response, response.responseSend)
+
+          /**
+            * 需要关闭当前连接
+            */
           case response: CloseConnectionResponse =>
             updateRequestMetrics(response)
             trace("Closing socket connection actively according to the response code.")
@@ -830,7 +837,13 @@ private[kafka] class Processor(val id: Int,
     }
   }
 
+  /**
+    *
+    */
   private def processCompletedReceives() {
+    /**
+      * 遍历处理接收到的请求
+      */
     selector.completedReceives.asScala.foreach { receive =>
       try {
         openOrClosingChannel(receive.source) match {
@@ -839,9 +852,20 @@ private[kafka] class Processor(val id: Int,
             val connectionId = receive.source
             val context = new RequestContext(header, connectionId, channel.socketAddress,
               channel.principal, listenerName, securityProtocol)
+            /**
+              * 封装请求信息为 Request 对象
+              */
             val req = new RequestChannel.Request(processor = id, context = context,
               startTimeNanos = time.nanoseconds, memoryPool, receive.payload, requestChannel.metrics)
+
+            /**
+              * 将请求对象放入请求队列中，等待 Handler 线程处理
+              */
             requestChannel.sendRequest(req)
+
+            /**
+              * 取消注册的 OP_READ 事件，处理期间不再接收新的请求（即不读取新的请求数据）
+              */
             selector.mute(connectionId)
             handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
           case None =>
@@ -858,8 +882,14 @@ private[kafka] class Processor(val id: Int,
   }
 
   private def processCompletedSends() {
+    /**
+      * 遍历处理已经完全发送出去的请求
+      */
     selector.completedSends.asScala.foreach { send =>
       try {
+        /**
+          * 因为当前响应已经发送成功，从 inflightResponses 中移除，不需要客户端确认
+          */
         val response = inflightResponses.remove(send.destination).getOrElse {
           throw new IllegalStateException(s"Send for ${send.destination} completed, but not in `inflightResponses`")
         }
@@ -887,13 +917,24 @@ private[kafka] class Processor(val id: Int,
   }
 
   private def processDisconnected() {
+    /**
+      * 遍历处理已经断开的连接
+      *
+      */
     selector.disconnected.keySet.asScala.foreach { connectionId =>
       try {
         val remoteHost = ConnectionId.fromString(connectionId).getOrElse {
           throw new IllegalStateException(s"connectionId has unexpected format: $connectionId")
         }.remoteHost
+
+        /**
+          * 将连接对应的所有响应从 inflightResponses 中移除
+          */
         inflightResponses.remove(connectionId).foreach(updateRequestMetrics)
         // the channel has been closed by the selector but the quotas still need to be updated
+        /**
+          * 对应的通道已经被关闭，所以需要减少对应 IP KafkaRequestHandler上的连接数
+          */
         connectionQuotas.dec(InetAddress.getByName(remoteHost))
       } catch {
         case e: Throwable => processException(s"Exception while processing disconnection of $connectionId", e)

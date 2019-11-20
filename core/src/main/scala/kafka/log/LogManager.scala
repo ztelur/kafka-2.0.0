@@ -670,6 +670,9 @@ class LogManager(logDirs: Seq[File], // log 目录集合，对应 log.dirs 配�
    */
   def getOrCreateLog(topicPartition: TopicPartition, config: LogConfig, isNew: Boolean = false, isFuture: Boolean = false): Log = {
     logCreationOrDeletionLock synchronized {
+      /**
+        * 获取指定 topic 分区对应的 Log 对象
+        */
       getLog(topicPartition, isFuture).getOrElse {
         // create the log if it has not already been created in another thread
         if (!isNew && offlineLogDirs.nonEmpty)
@@ -694,6 +697,9 @@ class LogManager(logDirs: Seq[File], // log 目录集合，对应 log.dirs 配�
           throw new KafkaStorageException(s"Can not create log for $topicPartition because log directory $logDir is offline")
 
         try {
+          /**
+            * 创建当前 topic 分区对应的日志目录
+            */
           val dir = {
             if (isFuture)
               new File(logDir, Log.logFutureDirName(topicPartition))
@@ -701,7 +707,9 @@ class LogManager(logDirs: Seq[File], // log 目录集合，对应 log.dirs 配�
               new File(logDir, Log.logDirName(topicPartition))
           }
           Files.createDirectories(dir.toPath)
-
+          /**
+            *  创建 Log 对象
+            */
           val log = Log(
             dir = dir,
             config = config,
@@ -714,6 +722,9 @@ class LogManager(logDirs: Seq[File], // log 目录集合，对应 log.dirs 配�
             brokerTopicStats = brokerTopicStats,
             logDirFailureChannel = logDirFailureChannel)
 
+          /**
+            * 缓存到本地 logs 字段中
+            */
           if (isFuture)
             futureLogs.put(topicPartition, log)
           else

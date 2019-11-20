@@ -31,6 +31,9 @@ import scala.collection.mutable
 
 /**
  * A thread that answers kafka requests.
+  *
+  * Processor 在将对应的 Request 请求对象记录到全局共享的请求队列之后，Handler 线程会消费该队列并处理对应的请求，
+  * 同时将处理完成的请求对应的响应对象写入到之前读取该请求的 Processor 的响应队列中
  */
 class KafkaRequestHandler(id: Int,
                           brokerId: Int,
@@ -50,22 +53,34 @@ class KafkaRequestHandler(id: Int,
       // time_window is independent of the number of threads, each recorded idle
       // time should be discounted by # threads.
       val startSelectTime = time.nanoseconds
-
+      /**
+        * 从请求队列中获取 Processor 封装的请求
+        */
       val req = requestChannel.receiveRequest(300)
       val endTime = time.nanoseconds
       val idleTime = endTime - startSelectTime
       aggregateIdleMeter.mark(idleTime / totalHandlerThreads.get)
 
       req match {
+        /**
+          * 处理关闭请求
+           */
         case RequestChannel.ShutdownRequest =>
           debug(s"Kafka request handler $id on broker $brokerId received shut down command")
           shutdownComplete.countDown()
           return
 
+        /**
+          * 处理正常的Request
+          */
         case request: RequestChannel.Request =>
           try {
             request.requestDequeueTimeNanos = endTime
             trace(s"Kafka request handler $id on broker $brokerId handling request $request")
+
+            /**
+              * 方法对请求进行处理，并将响应结果写入到对应 Processor 的响应队列中。
+              */
             apis.handle(request)
           } catch {
             case e: FatalExitError =>
