@@ -21,6 +21,17 @@ import kafka.cluster.BrokerEndPoint
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.utils.Time
 
+/**
+  * 管理 follower 副本与 leader 副本的同步工作
+  * ReplicaFetcherManager 将当前 broker 节点管理的分区对应的副本按照一定的条件进行分组，并为每个组创建一个 fetcher 线程，
+  * 用于从对应 leader 副本所在的 broker 节点拉取指定 offset 的消息数据。
+  * @param brokerConfig
+  * @param replicaManager
+  * @param metrics
+  * @param time
+  * @param threadNamePrefix
+  * @param quotaManager
+  */
 class ReplicaFetcherManager(brokerConfig: KafkaConfig, protected val replicaManager: ReplicaManager, metrics: Metrics,
                             time: Time, threadNamePrefix: Option[String] = None, quotaManager: ReplicationQuotaManager)
       extends AbstractFetcherManager("ReplicaFetcherManager on broker " + brokerConfig.brokerId,

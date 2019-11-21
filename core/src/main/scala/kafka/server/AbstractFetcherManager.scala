@@ -109,10 +109,26 @@ abstract class AbstractFetcherManager(protected val name: String, clientId: Stri
   }
 
   // to be defined in subclass to create a specific fetcher
+  /**
+    *
+    * @param fetcherId
+    * @param sourceBroker
+    * @return
+    */
   def createFetcherThread(fetcherId: Int, sourceBroker: BrokerEndPoint): AbstractFetcherThread
 
+
+  /**
+    * 将指定的待同步 topic 分区分组，并为每个分组创建并启动一个 fetcher 线程，
+    * 从指定的 offset 开始与 leader 副本进行同步。
+    * @param partitionAndOffsets
+    */
   def addFetcherForPartitions(partitionAndOffsets: Map[TopicPartition, BrokerAndInitialOffset]) {
     lock synchronized {
+      /**
+        * 由分区所属的 topic 和分区编号计算得到对应的 fetcher 线程 ID，并与 broker 的网络位置信息组成 key，然后按 key 进行分组，
+        * 后面会为每组分配一个 fetcher 线程，每个线程只连接一个 broker，可以同时为组内多个分区的 follower 副本执行同步操作
+        */
       val partitionsPerFetcher = partitionAndOffsets.groupBy { case(topicPartition, brokerAndInitialFetchOffset) =>
         BrokerAndFetcherId(brokerAndInitialFetchOffset.broker, getFetcherId(topicPartition.topic, topicPartition.partition))}
 
@@ -122,6 +138,9 @@ abstract class AbstractFetcherManager(protected val name: String, clientId: Stri
         fetcherThread.start
       }
 
+      /**
+        * 启动所有的的 fetcher 线程，如果对应线程不存在，则创建并启动
+        */
       for ((brokerAndFetcherId, initialFetchOffsets) <- partitionsPerFetcher) {
         val brokerIdAndFetcherId = BrokerIdAndFetcherId(brokerAndFetcherId.broker.id, brokerAndFetcherId.fetcherId)
         fetcherThreadMap.get(brokerIdAndFetcherId) match {
@@ -129,11 +148,18 @@ abstract class AbstractFetcherManager(protected val name: String, clientId: Stri
             // reuse the fetcher thread
           case Some(f) =>
             f.shutdown()
+
+            /**
+              * 创建 ReplicaFetcherThread 线程对象，并记录到 fetcherThreadMap 集合中
+              */
             addAndStartFetcherThread(brokerAndFetcherId, brokerIdAndFetcherId)
           case None =>
             addAndStartFetcherThread(brokerAndFetcherId, brokerIdAndFetcherId)
         }
 
+        /**
+          * 将 topic 分区和同步起始位置传递给 fetcher 线程，并唤醒 fetcher 线程开始同步
+          */
         fetcherThreadMap(brokerIdAndFetcherId).addPartitions(initialFetchOffsets.map { case (tp, brokerAndInitOffset) =>
           tp -> brokerAndInitOffset.initOffset
         })

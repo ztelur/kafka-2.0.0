@@ -37,6 +37,18 @@ import org.apache.kafka.common.utils.{LogContext, Time}
 import scala.collection.JavaConverters._
 import scala.collection.{Map, mutable}
 
+/**
+  * 线程被启动之后会循环调度执行 AbstractFetcherThread#doWork 方法，该方法会构造 FetchRequest 请求从 leader 副本拉取指定 offset 对应的消息数据，并处理 FetchResponse 响应
+  * @param name
+  * @param fetcherId
+  * @param sourceBroker
+  * @param brokerConfig
+  * @param replicaMgr
+  * @param metrics
+  * @param time
+  * @param quota
+  * @param leaderEndpointBlockingSend
+  */
 class ReplicaFetcherThread(name: String,
                            fetcherId: Int,
                            sourceBroker: BrokerEndPoint,
@@ -128,11 +140,22 @@ class ReplicaFetcherThread(name: String,
   }
 
   // process fetched data
+  /**
+    * 成功fetch来数据后，对数据进行处理
+    *
+    * 将从对应 leader 副本拉取回来的消息数据写入 follower 副本对应的 Log 对象中，并更新本地缓存的对应分区的消息同步状态信息
+    * @param topicPartition
+    * @param fetchOffset
+    * @param partitionData
+    */
   def processPartitionData(topicPartition: TopicPartition, fetchOffset: Long, partitionData: PartitionData) {
     val replica = replicaMgr.getReplicaOrException(topicPartition)
     val partition = replicaMgr.getPartition(topicPartition).get
     val records = partitionData.toRecords
 
+    /**
+      * 如果拉取到的消息数据过大，则打印异常
+      */
     maybeWarnIfOversizedRecords(records, topicPartition)
 
     if (fetchOffset != replica.logEndOffset.messageOffset)
@@ -143,12 +166,18 @@ class ReplicaFetcherThread(name: String,
       trace("Follower has replica log end offset %d for partition %s. Received %d messages and leader hw %d"
         .format(replica.logEndOffset.messageOffset, topicPartition, records.sizeInBytes, partitionData.highWatermark))
 
+    /**
+      * 将消息追加到 Log 中，因为 leader 已经为消息分配了 offset，所以 follower 无需在对消息分配 offset 值
+      */
     // Append the leader's messages to the log
     partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = false)
 
     if (isTraceEnabled)
       trace("Follower has replica log end offset %d after appending %d bytes of messages for partition %s"
         .format(replica.logEndOffset.messageOffset, records.sizeInBytes, topicPartition))
+    /**
+      * 更新对应 follower 副本的 HW 值
+      */
     val followerHighWatermark = replica.logEndOffset.messageOffset.min(partitionData.highWatermark)
     val leaderLogStartOffset = partitionData.logStartOffset
     // for the follower replica, we do not need to keep
@@ -192,13 +221,27 @@ class ReplicaFetcherThread(name: String,
      *
      * There is a potential for a mismatch between the logs of the two replicas here. We don't fix this mismatch as of now.
      */
+    /**
+      * 发送 ListOffsetRequest 请求，获取 leader 副本的 LEO 值
+      */
     val leaderEndOffset: Long = earliestOrLatestOffset(topicPartition, ListOffsetRequest.LATEST_TIMESTAMP)
 
+    /**
+      * 如果 leader 副本的 LEO 值落后于 follower 副本的 LEO 值
+      */
     if (leaderEndOffset < replica.logEndOffset.messageOffset) {
       warn(s"Reset fetch offset for partition $topicPartition from ${replica.logEndOffset.messageOffset} to current " +
         s"leader's latest offset $leaderEndOffset")
       partition.truncateTo(leaderEndOffset, isFuture = false)
+
+      /**
+        * 将分区对应的 Log 截断到 leader 副本的 LEO 位置，从该位置开始重新与 leader 副本进行同步
+        */
       replicaMgr.replicaAlterLogDirsManager.markPartitionsForTruncation(brokerConfig.brokerId, topicPartition, leaderEndOffset)
+
+      /**
+        * 返回下次获取消息的 offset 位置
+        */
       leaderEndOffset
     } else {
       /**
