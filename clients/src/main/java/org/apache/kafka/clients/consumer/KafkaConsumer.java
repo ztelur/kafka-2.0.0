@@ -546,6 +546,9 @@ import java.util.regex.Pattern;
 public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
     private static final long NO_CURRENT_THREAD = -1L;
+    /**
+     * 客户端 ID 生成器
+     */
     private static final AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE = new AtomicInteger(1);
     private static final String JMX_PREFIX = "kafka.consumer";
     static final long DEFAULT_CLOSE_TIMEOUT_MS = 30 * 1000;
@@ -554,27 +557,71 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     final Metrics metrics;
 
     private final Logger log;
+    /**
+     * 客户端 ID
+     */
     private final String clientId;
+    /**
+     * 控制消费者与 GroupCoordinator 之间交互
+     */
     private final ConsumerCoordinator coordinator;
+    /**
+     * key 反序列化器
+     */
     private final Deserializer<K> keyDeserializer;
+    /**
+     * value 反序列化器
+     */
     private final Deserializer<V> valueDeserializer;
+    /**
+     * 负责从服务端拉取消息
+     */
     private final Fetcher<K, V> fetcher;
+    /**
+     * 拦截器集合， 在方法返回给用户之前进行拦截修改
+     */
     private final ConsumerInterceptors<K, V> interceptors;
-
+    /**
+     * 时间戳工具
+     */
     private final Time time;
+    /**
+     *  集群网络通信客户端，对 NetworkClient 的封装
+     */
     private final ConsumerNetworkClient client;
+    /**
+     * 维护消费者的消费状态
+     */
     private final SubscriptionState subscriptions;
+    /**
+     * 集群元数据
+     */
     private final Metadata metadata;
+    /**
+     * 重试间隔
+     */
     private final long retryBackoffMs;
+    /**
+     * 请求超时时间
+     */
     private final long requestTimeoutMs;
     private final int defaultApiTimeoutMs;
+    /**
+     * 标识当前消费者是否关闭
+     */
     private volatile boolean closed = false;
     private List<PartitionAssignor> assignors;
 
     // currentThread holds the threadId of the current thread accessing KafkaConsumer
     // and is used to prevent multi-threaded access
+    /**
+     * 记录当前正在使用 KafkaConsumer 的线程 ID，防止多个线程同时使用同一个 KafkaConsumer 对象
+     */
     private final AtomicLong currentThread = new AtomicLong(NO_CURRENT_THREAD);
     // refcount is used to allow reentrant access by the thread who has acquired currentThread
+    /**
+     * 记录线程重入次数
+     */
     private final AtomicInteger refcount = new AtomicInteger(0);
 
     // to keep from repeatedly scanning subscriptions in poll(), cache the result during metadata updates
@@ -900,15 +947,23 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @throws IllegalStateException If {@code subscribe()} is called previously with pattern, or assign is called
      *                               previously (without a subsequent call to {@link #unsubscribe()}), or if not
      *                               configured at-least one partition assignment strategy
+     *
+     *                               在使用 KafkaConsumer 消费服务端消息之前，我们首先需要调用 KafkaConsumer#subscribe 方法订阅 topic 列表
      */
     @Override
     public void subscribe(Collection<String> topics, ConsumerRebalanceListener listener) {
+        /**
+         * 防止一个 KafkaConsumer 对象被多个线程同时使用，以保证线程安全
+         */
         acquireAndEnsureOpen();
         try {
             if (topics == null) {
                 throw new IllegalArgumentException("Topic collection to subscribe to cannot be null");
             } else if (topics.isEmpty()) {
                 // treat subscribing to empty topic list as the same as unsubscribing
+                /**
+                 * 如果传递空的 topic 订阅列表，则视为解除订阅
+                 */
                 this.unsubscribe();
             } else {
                 for (String topic : topics) {
@@ -919,10 +974,16 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 throwIfNoAssignorsConfigured();
 
                 log.debug("Subscribed to topic(s): {}", Utils.join(topics, ", "));
+                /**
+                 * 调用 SubscriptionState#subscribe 方法订阅指定 topic 集合
+                 */
                 this.subscriptions.subscribe(new HashSet<>(topics), listener);
                 metadata.setTopics(subscriptions.groupSubscription());
             }
         } finally {
+            /**
+             * 线程重入计数 refcount 减 1，如果 refcount = 0，则标记当前 KafkaConsumer 对象没有线程占用
+             */
             release();
         }
     }
@@ -1157,8 +1218,13 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     private ConsumerRecords<K, V> poll(final long timeoutMs, final boolean includeMetadataInTimeout) {
         acquireAndEnsureOpen();
         try {
+            /**
+             * 超时时间不允许设置为负数，但是允许设置为 0
+             */
             if (timeoutMs < 0) throw new IllegalArgumentException("Timeout must not be negative");
-
+            /**
+             * 当前消费者未订阅任何 topic
+             */
             if (this.subscriptions.hasNoSubscriptionOrUserAssignment()) {
                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
             }
@@ -1183,7 +1249,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                     }
                     metadataEnd = time.milliseconds();
                 }
-
+                /**
+                 * 拉取消息，优先从本地缓存中获取，如果没有则会请求服务端，期间会尝试执行分区再分配策略，以及异步提交 offset
+                 */
                 final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = pollForFetches(remainingTimeAtLeastZero(timeoutMs, elapsedTime));
 
                 if (!records.isEmpty()) {
@@ -1193,10 +1261,22 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                     //
                     // NOTE: since the consumed position has already been updated, we must not allow
                     // wakeups or any other errors to be triggered prior to returning the fetched records.
+                    /**
+                     * 为了提升效率，在对响应的消息处理之前，先发送下一次 fetch 请求，
+                     * 从而让处理消息的过程与拉取消息的过程并行，以减少等待网络 IO 的时间
+                     *
+                     * 如果拉取成功（即返回结果不为空），方法并不会立即将结果返回，而是在返回之前尝试发送下一次拉取消息的请求。因为拉取消息涉及网络通信，
+                     * 需要与远端集群进行交互，比较耗时，而业务处理消息也是一个耗时的过程，Kafka 的设计者巧妙的将这两步并行执行，以提升效率。
+                     */
                     if (fetcher.sendFetches() > 0 || client.hasPendingRequests()) {
+                        /**
+                         * 如果有待发送的请求，执行一次不可中断的 poll 请求
+                         */
                         client.pollNoWakeup();
                     }
-
+                    /**
+                     * 如果注册了拦截器，则在返回之前先应用拦截器
+                     */
                     return this.interceptors.onConsume(new ConsumerRecords<>(records));
                 }
                 final long fetchEnd = time.milliseconds();
@@ -1227,12 +1307,18 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         long pollTimeout = Math.min(coordinator.timeToNextPoll(startMs), timeoutMs);
 
         // if data is available already, return it immediately
+        /**
+         * 尝试从本地获取缓存的消息
+         */
         final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = fetcher.fetchedRecords();
         if (!records.isEmpty()) {
             return records;
         }
 
         // send any new fetches (won't resend pending fetches)
+        /**
+         * 如果本地没有直接可用的消息，则创建 FetchRequest 请求，从集群拉取消息数据
+         */
         fetcher.sendFetches();
 
         // We do not want to be stuck blocking in poll if we are missing some positions
@@ -1243,7 +1329,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         if (!cachedSubscriptionHashAllFetchPositions && pollTimeout > retryBackoffMs) {
             pollTimeout = retryBackoffMs;
         }
-
+        /**
+         * 发送 FetchRequest 请求
+         */
         client.poll(pollTimeout, startMs, () -> {
             // since a fetch might be completed by the background thread, we need this poll condition
             // to ensure that we do not block unnecessarily in poll()
@@ -1252,10 +1340,15 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
         // after the long poll, we should check whether the group needs to rebalance
         // prior to returning data so that the group can stabilize faster
+        /**
+         * 检查是否需要执行分区再分配，如果是则返回空的结果，以保证尽快对分区执行再平衡操作
+         */
         if (coordinator.rejoinNeededOrPending()) {
             return Collections.emptyMap();
         }
-
+        /**
+         * 获取 FetchRequest 请求返回的消息
+         */
         return fetcher.fetchedRecords();
     }
 
@@ -2169,6 +2262,10 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @return true iff the operation completed without timing out
      */
     private boolean updateFetchPositions(final long timeoutMs) {
+        /**
+         * 检测分配给当前消费者的分区在本地是不是都记录着对应的 offset 值，如果存在没有记录 offset 值的分区
+         * 则需要调用 KafkaConsumer#updateFetchPositions 方法对这些分区进行更新
+         */
         cachedSubscriptionHashAllFetchPositions = subscriptions.hasAllFetchPositions();
         if (cachedSubscriptionHashAllFetchPositions) return true;
 
@@ -2177,6 +2274,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         // coordinator lookup if there are partitions which have missing positions, so
         // a consumer with manually assigned partitions can avoid a coordinator dependence
         // by always ensuring that assigned partitions have an initial position.
+        /**
+         * 对于需要重置 offset 的分区，请求分区 leader 副本所在节点获取对应的 offset 值
+         */
         if (!coordinator.refreshCommittedOffsetsIfNeeded(timeoutMs)) return false;
 
         // If there are partitions still needing a position and a reset policy is defined,
@@ -2194,6 +2294,10 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     /**
      * Acquire the light lock and ensure that the consumer hasn't been closed.
      * @throws IllegalStateException If the consumer has been closed
+     * 检测当前 consumer 是否关闭，如果关闭则抛出异常
+     *
+     * 该方法首先会验证当前 KafkaConsumer 对象是否被关闭，如果没有被关闭则会继续验证当前操作线程是否是已经持有该 KafkaConsumer 对象的线程，
+     * 如果不是且当前 KafkaConsumer 对象被其它线程持有，则会抛出异常，否则将重入计数 refcount 加 1
      */
     private void acquireAndEnsureOpen() {
         acquire();
@@ -2210,9 +2314,15 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @throws ConcurrentModificationException if another thread already has the lock
      */
     private void acquire() {
+        /**
+         * 如果存在多个线程使用同一个 consumer 对象，则抛出异常
+         */
         long threadId = Thread.currentThread().getId();
         if (threadId != currentThread.get() && !currentThread.compareAndSet(NO_CURRENT_THREAD, threadId))
             throw new ConcurrentModificationException("KafkaConsumer is not safe for multi-threaded access");
+        /**
+         * 线程重入次数加 1
+         */
         refcount.incrementAndGet();
     }
 

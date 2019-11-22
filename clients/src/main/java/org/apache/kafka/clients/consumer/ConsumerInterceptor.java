@@ -41,7 +41,10 @@ import java.util.Map;
  * Implement {@link org.apache.kafka.common.ClusterResourceListener} to receive cluster metadata once it's available. Please see the class documentation for ClusterResourceListener for more information.
  */
 public interface ConsumerInterceptor<K, V> extends Configurable {
-
+    /**
+     * 其中 ConsumerInterceptor#onConsume 方法会在消息数据被返回给应用程序之前执行，
+     * 如 KafkaConsumer#poll 方法所示，而方法 ConsumerInterceptor#onCommit 会在 offset 成功提交后被调用。
+     */
     /**
      * This is called just before the records are returned by
      * {@link org.apache.kafka.clients.consumer.KafkaConsumer#poll(java.time.Duration)}

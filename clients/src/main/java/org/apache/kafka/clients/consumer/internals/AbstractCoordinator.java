@@ -101,24 +101,70 @@ public abstract class AbstractCoordinator implements Closeable {
     }
 
     private final Logger log;
+    /**
+     * 消费者与服务端会话超时时间，超过该时间则认为与服务端断开连接
+     */
     private final int sessionTimeoutMs;
+    /**
+     * 指定消费者被关闭时是否离开所属 group，如果为 true 的话会触发分区再分配操作
+     */
     private final boolean leaveGroupOnClose;
     private final GroupCoordinatorMetrics sensors;
+    /**
+     * 心跳机制
+     */
     private final Heartbeat heartbeat;
+    /**
+     * 分区再分配操作超时时间
+     */
     protected final int rebalanceTimeoutMs;
+    /**
+     * 当前消费者所属的 group
+     */
     protected final String groupId;
+    /**
+     * 网络通信客户端
+     */
     protected final ConsumerNetworkClient client;
+    /**
+     * 时间戳工具
+     */
     protected final Time time;
+    /**
+     * 重试时间间隔
+     */
     protected final long retryBackoffMs;
-
+    /**
+     * 执行心跳机制的线程
+     */
     private HeartbeatThread heartbeatThread = null;
+    /**
+     * 标记是否需要重新发送 {@link JoinGroupRequest} 的请求条件之一
+     */
     private boolean rejoinNeeded = true;
+    /**
+     * 标记是否需要执行发送 {@link JoinGroupRequest} 请求前的准备工作
+     */
     private boolean needsJoinPrepare = true;
+    /**
+     * 记录当前消费者的运行状态
+     */
     private MemberState state = MemberState.UNJOINED;
+    /**
+     * 分区再分配操作请求对应的 future 对象，避免多个请求同时执行
+     */
     private RequestFuture<ByteBuffer> joinFuture = null;
+    /**
+     * 服务端 GroupCoordinator 所在节点
+     */
     private Node coordinator = null;
+    /**
+     * 服务端 GroupCoordinator 返回的年代信息，用于区分两次分区再分配操作
+     */
     private Generation generation = Generation.NO_GENERATION;
-
+    /**
+     * 获取可用 GroupCoordinator 节点请求对应的 future，避免多个请求同时执行
+     */
     private RequestFuture<Void> findCoordinatorFuture = null;
     
     /**
@@ -392,8 +438,13 @@ public abstract class AbstractCoordinator implements Closeable {
      */
     boolean joinGroupIfNeeded(final long timeoutMs, final long startTimeMs) {
         long elapsedTime = 0L;
-
+        /**
+         * 如果需要执行分区再分配，且目前正在进行中
+         */
         while (rejoinNeededOrPending()) {
+            /**
+             * 再次检查目标 GroupCoordinator 节点是否准备好接收请求
+             */
             if (!ensureCoordinatorReady(remainingTimeAtLeastZero(timeoutMs, elapsedTime))) {
                 return false;
             }
@@ -404,18 +455,31 @@ public abstract class AbstractCoordinator implements Closeable {
             // on each iteration of the loop because an event requiring a rebalance (such as a metadata
             // refresh which changes the matched subscription set) can occur while another rebalance is
             // still in progress.
+            /**
+             * 执行前期准备工作
+             */
             if (needsJoinPrepare) {
+                /**
+                 * 1 如果开启了 offset 自动提交，则同步提交 offset
+                 * 2 调用注册的 ConsumerRebalanceListener 监听器的 onPartitionsRevoked 方法
+                 * 3 取消当前消费者的 leader 身份（如果是的话），恢复成为一个普通的消费者
+                 */
                 onJoinPrepare(generation.generationId, generation.memberId);
                 needsJoinPrepare = false;
             }
-
+            /**
+             * 创建并发送 JoinGroupRequest 请求，申请加入目标 group
+             */
             final RequestFuture<ByteBuffer> future = initiateJoinGroup();
             client.poll(future, remainingTimeAtLeastZero(timeoutMs, elapsedTime));
+
             if (!future.isDone()) {
                 // we ran out of time
                 return false;
             }
-
+            /**
+             * 执行分区分配成功
+             */
             if (future.succeeded()) {
                 // Duplicate the buffer in case `onJoinComplete` does not complete and needs to be retried.
                 ByteBuffer memberAssignment = future.value().duplicate();
@@ -426,6 +490,9 @@ public abstract class AbstractCoordinator implements Closeable {
                 resetJoinGroupFuture();
                 needsJoinPrepare = true;
             } else {
+                /**
+                 * 执行分区分配失败，依据失败类型考虑是否重试
+                 */
                 resetJoinGroupFuture();
                 final RuntimeException exception = future.exception();
                 if (exception instanceof UnknownMemberIdException ||
@@ -524,6 +591,10 @@ public abstract class AbstractCoordinator implements Closeable {
                 .compose(new JoinGroupResponseHandler());
     }
 
+    /**
+     * 消费者通过注册结果处理器 JoinGroupResponseHandler
+     * 对请求的响应结果进行处理，如果是正常响应则会执行分区分配操作
+     */
     private class JoinGroupResponseHandler extends CoordinatorResponseHandler<JoinGroupResponse, ByteBuffer> {
         @Override
         public void handle(JoinGroupResponse joinResponse, RequestFuture<ByteBuffer> future) {
@@ -536,13 +607,33 @@ public abstract class AbstractCoordinator implements Closeable {
                     if (state != MemberState.REBALANCING) {
                         // if the consumer was woken up before a rebalance completes, we may have already left
                         // the group. In this case, we do not want to continue with the sync group.
+                        /**
+                         * 在接收到响应之前，消费者的状态发生变更（可能已经从所属 group 离开），抛出异常
+                         */
                         future.raise(new UnjoinedGroupException());
                     } else {
+                        /**
+                         * 基于响应，更新 group 的年代信息
+                         */
                         AbstractCoordinator.this.generation = new Generation(joinResponse.generationId(),
                                 joinResponse.memberId(), joinResponse.groupProtocol());
+                        /**
+                         * 如果当前消费者是 group 中的 leader 角色
+                         */
                         if (joinResponse.isLeader()) {
-                            onJoinLeader(joinResponse).chain(future);
+                            /**
+                             * 基于分区分配策略执行分区分配，leader 需要关注当前 group 中所有消费者订阅的 topic，
+                             * 并发送 SyncGroupRequest 请求反馈分区分配结果给 GroupCoordinator 节点
+                             */
+                            onJoinLeader(joinResponse)
+                                    /**
+                                     * 这里调用 chain 方法，是希望当 SyncGroupResponse 处理完成之后，能够将结果传递给 future
+                                     */
+                                    .chain(future);
                         } else {
+                            /**
+                             * 如果是 follower 消费者，则只关注自己订阅的 topic，这一步仅发送 SyncGroupRequest 请求
+                             */
                             onJoinFollower().chain(future);
                         }
                     }

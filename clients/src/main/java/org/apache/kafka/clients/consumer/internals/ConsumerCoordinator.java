@@ -67,25 +67,70 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class ConsumerCoordinator extends AbstractCoordinator {
     private final Logger log;
+    /**
+     * 消费者在发送 JoinGroupRequest 请求时会传递自己支持的分区分配策略，服务端会从所有消费者都支持的策略中选择一种
+     * 并通知 group leader 使用此分配策略进行分配
+     */
     private final List<PartitionAssignor> assignors;
+    /**
+     * 集群元数据信息
+     */
     private final Metadata metadata;
     private final ConsumerCoordinatorMetrics sensors;
+    /**
+     * 记录 topic 分区和 offset 的对应关系
+     */
     private final SubscriptionState subscriptions;
+    /**
+     * 默认的 offset 提交完成时的 callback
+     */
     private final OffsetCommitCallback defaultOffsetCommitCallback;
+    /**
+     * 是否启用 offset 自动提交策略
+     */
     private final boolean autoCommitEnabled;
+    /**
+     * offset 自动提交时间间隔
+     */
     private final int autoCommitIntervalMs;
+    /**
+     * 注册的拦截器集合
+     */
     private final ConsumerInterceptors<?, ?> interceptors;
+    /**
+     * 是否排除内部 topic，即 offset topic
+     */
     private final boolean excludeInternalTopics;
+    /**
+     * 记录正在等待异步提交 offset 的请求数目
+     */
     private final AtomicInteger pendingAsyncCommits;
 
     // this collection must be thread-safe because it is modified from the response handler
     // of offset commit requests, which may be invoked from the heartbeat thread
+    /**
+     * 记录每个 offset 提交对应的响应 callback
+     */
     private final ConcurrentLinkedQueue<OffsetCommitCompletion> completedOffsetCommits;
-
+    /**
+     * 标记当前消费者是不是 group leader
+     */
     private boolean isLeader = false;
+    /**
+     * 当前消费者成功订阅的 topic 集合
+     */
     private Set<String> joinedSubscription;
+    /**
+     * 元数据快照，用于检测 topic 分区数量是否发生变化
+     */
     private MetadataSnapshot metadataSnapshot;
+    /**
+     * 元数据快照，用于检测分区分配过程中分区数量是否发生变化
+     */
     private MetadataSnapshot assignmentSnapshot;
+    /**
+     * 下一次自动提交 offset 的截止时间
+     */
     private long nextAutoCommitDeadline;
 
     // hold onto request&future for committed offset requests to enable async calls.
@@ -297,14 +342,20 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      *
      * @param timeoutMs The amount of time, in ms, allotted for this operation.
      * @return true iff the operation succeeded
+     * 从而开始对当前 topic 分区执行再分配
      */
     public boolean poll(final long timeoutMs) {
         final long startTime = time.milliseconds();
         long currentTime = startTime;
         long elapsed = 0L;
-
+        /**
+         * 触发执行注册的监听 offset 提交完成的方法
+         */
         invokeCompletedOffsetCommitCallbacks();
-
+        /**
+         * 确保当前是 AUTO_TOPICS 或 AUTO_PATTERN（USER_ASSIGNED 不需要再平衡）订阅模式，
+         * 且目标 GroupCoordinator 节点可达，如果不可达，则会尝试寻找一个可用的节点
+         */
         if (subscriptions.partitionsAutoAssigned()) {
             // Always update the heartbeat last poll time so that the heartbeat thread does not leave the
             // group proactively due to application inactivity even if (say) the coordinator cannot be found.
@@ -317,11 +368,16 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 currentTime = time.milliseconds();
                 elapsed = currentTime - startTime;
             }
-
+            /**
+             * 需要执行再平衡
+             */
             if (rejoinNeededOrPending()) {
                 // due to a race condition between the initial metadata fetch and the initial rebalance,
                 // we need to ensure that the metadata is fresh before joining initially. This ensures
                 // that we have matched the pattern against the cluster's topics at least once before joining.
+                /**
+                 * 如果是 AUTO_PATTERN 订阅模式，则检查是否需要更新集群元数据
+                 */
                 if (subscriptions.hasPatternSubscription()) {
                     // For consumer group that uses pattern-based subscription, after a topic is created,
                     // any consumer that discovers the topic after metadata refresh can trigger rebalance
@@ -339,7 +395,11 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                     currentTime = time.milliseconds();
                     elapsed = currentTime - startTime;
                 }
-
+                /**
+                 * 检查目标 GroupCoordinator 节点是否准备好接收请求
+                 * 启动心跳线程
+                 * 执行分区再分配操作
+                 */
                 if (!ensureActiveGroup(remainingTimeAtLeastZero(timeoutMs, elapsed))) {
                     return false;
                 }
@@ -363,7 +423,9 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 currentTime = time.milliseconds();
             }
         }
-
+        /**
+         * 异步提交 offset
+         */
         maybeAutoCommitOffsetsAsync(currentTime);
         return true;
     }
@@ -485,17 +547,28 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
     @Override
     public boolean rejoinNeededOrPending() {
+        /**
+         * USER_ASSIGNED 订阅模式不需要执行分区再分配
+         */
         if (!subscriptions.partitionsAutoAssigned())
             return false;
 
         // we need to rejoin if we performed the assignment and metadata has changed
+        /**
+         * 再平衡过程中分区数量发生变化
+         */
         if (assignmentSnapshot != null && !assignmentSnapshot.equals(metadataSnapshot))
             return true;
 
         // we need to join if our subscription has changed since the last join
+        /**
+         * 消费者 topic 订阅信息发生变化
+         */
         if (joinedSubscription != null && !joinedSubscription.equals(subscriptions.subscription()))
             return true;
-
+        /**
+         * 其它标识需要再平衡的操作，例如分区再分配执行失败、重置年代信息等
+         */
         return super.rejoinNeededOrPending();
     }
 
@@ -670,10 +743,22 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      * @throws CommitFailedException if an unrecoverable error occurs before the commit can be completed
      * @return If the offset commit was successfully sent and a successful response was received from
      *         the coordinator
+     *
+     *
+     * 1 触发注册的监听 offset 提交完成的回调方法；
+     * 2 校验待提交的 offset 数据是否为空，如果为空则直接返回；
+     * 3 校验目标 GroupCoordinator 实例所在节点是否可用，如果不可用则尝试寻找负载最小且可用的节点；
+     * 4 创建并发送提交 offset 的 OffsetCommitRequest 请求；
+     * 5 处理请求的响应结果。
      */
     public boolean commitOffsetsSync(Map<TopicPartition, OffsetAndMetadata> offsets, long timeoutMs) {
+        /**
+         * 触发注册的监听 offset 提交完成的方法
+         */
         invokeCompletedOffsetCommitCallbacks();
-
+        /**
+         * 如果提交的 offset 数据为空，则直接返回
+         */
         if (offsets.isEmpty())
             return true;
 
@@ -681,13 +766,24 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         long startMs = now;
         long remainingMs = timeoutMs;
         do {
+            /**
+             * 如果目标 GroupCoordinator 节点不可用
+             */
             if (coordinatorUnknown()) {
+                /**
+                 * 尝试寻找负载最小且可用的 GroupCoordinator 节点
+                 */
                 if (!ensureCoordinatorReady(remainingMs))
+                /**
+                 * 如果目标 GroupCoordinator 节点未准备好接收请求
+                 */
                     return false;
 
                 remainingMs = timeoutMs - (time.milliseconds() - startMs);
             }
-
+            /**
+             * 创建并发送 OffsetCommitRequest 请求，提交 offset 值
+             */
             RequestFuture<Void> future = sendOffsetCommitRequest(offsets);
             client.poll(future, remainingMs);
 
@@ -695,13 +791,17 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             // the corresponding callbacks are invoked prior to returning in order to preserve the order that
             // the offset commits were applied.
             invokeCompletedOffsetCommitCallbacks();
-
+            /**
+             * 提交成功
+             */
             if (future.succeeded()) {
                 if (interceptors != null)
                     interceptors.onCommit(offsets);
                 return true;
             }
-
+            /**
+             * 提交失败，且不可重试，则抛出异常
+             */
             if (future.failed() && !future.isRetriable())
                 throw future.exception();
 
@@ -743,11 +843,24 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         });
     }
 
+    /**
+     * 该方法的调用时机有两个地方：
+     *  执行分区再分配操作的准备阶段（ConsumerCoordinator#onJoinPrepare 方法）；
+     *  关闭消费者的时候（ConsumerCoordinator#close 方法，KafkaConsumer#close 方法在执行时会调用该方法）。
+     *
+     * @param timeoutMs
+     */
     private void maybeAutoCommitOffsetsSync(long timeoutMs) {
         if (autoCommitEnabled) {
+            /**
+             * 获取当前消费者订阅的所有 topic 分区，以及分区对应的消费状态信息
+             */
             Map<TopicPartition, OffsetAndMetadata> allConsumedOffsets = subscriptions.allConsumed();
             try {
                 log.debug("Sending synchronous auto-commit of offsets {}", allConsumedOffsets);
+                /**
+                 * 执行同步 offset 提交
+                 */
                 if (!commitOffsetsSync(allConsumedOffsets, timeoutMs))
                     log.debug("Auto-commit of offsets {} timed out before completion", allConsumedOffsets);
             } catch (WakeupException | InterruptException e) {
@@ -776,44 +889,80 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      *
      * @param offsets The list of offsets per partition that should be committed.
      * @return A request future whose value indicates whether the commit was successful or not
+     *
+     * 1 校验待发送的请求数据是否为空，如果为空则直接返回成功；
+     * 2 获取目标 GroupCoordinator 实例所在 broker 节点，并校验其可用性；
+     * 3 封装每个目标分区的待提交 offset 数据；
+     * 4 获取并校验当前 group 的年代信息，防止提交一些已经离开 group 的消费者的 offset 数据；
+     * 5 创建并缓存 OffsetCommitRequest 请求，同时注册响应结果处理器。
+     *
      */
     private RequestFuture<Void> sendOffsetCommitRequest(final Map<TopicPartition, OffsetAndMetadata> offsets) {
         if (offsets.isEmpty())
+        /**
+         * 如果没有请求的数据，则直接返回
+         */
             return RequestFuture.voidSuccess();
-
+        /**
+         * 获取 GroupCoordinator 节点，并检查其可达性
+         */
         Node coordinator = checkAndGetCoordinator();
         if (coordinator == null)
             return RequestFuture.coordinatorNotAvailable();
 
         // create the offset commit request
+        /**
+         * 封装每个分区对应提交的 offset 数据
+         */
         Map<TopicPartition, OffsetCommitRequest.PartitionData> offsetData = new HashMap<>(offsets.size());
         for (Map.Entry<TopicPartition, OffsetAndMetadata> entry : offsets.entrySet()) {
             OffsetAndMetadata offsetAndMetadata = entry.getValue();
             if (offsetAndMetadata.offset() < 0) {
+                /**
+                 * 非法的 offset 值
+                 */
                 return RequestFuture.failure(new IllegalArgumentException("Invalid offset: " + offsetAndMetadata.offset()));
             }
+            /**
+             * key 是分区，value 是分区对应的请求数据
+             */
             offsetData.put(entry.getKey(), new OffsetCommitRequest.PartitionData(
                     offsetAndMetadata.offset(), offsetAndMetadata.metadata()));
         }
-
+        /**
+         * 获取当前消费者所属 group 的年代信息
+         */
         final Generation generation;
         if (subscriptions.partitionsAutoAssigned())
+        /**
+         * 如果是 AUTO_TOPICS 或 AUTO_PATTERN 订阅模式，则获取年代信息
+         */
             generation = generation();
         else
+        /**
+         * 对于 USER_ASSIGNED 模式，因为不涉及到分区再分配操作，所以没有年代信息
+         */
             generation = Generation.NO_GENERATION;
 
         // if the generation is null, we are not part of an active group (and we expect to be).
         // the only thing we can do is fail the commit and let the user rejoin the group in poll()
         if (generation == null)
+        /**
+         * 如果获取 group 年代信息失败，则说明当前消费者并不属于该 group，抛出异常，需要执行分区再分配
+         */
             return RequestFuture.failure(new CommitFailedException());
-
+        /**
+         * 创建 OffsetCommitRequest 请求
+         */
         OffsetCommitRequest.Builder builder = new OffsetCommitRequest.Builder(this.groupId, offsetData).
                 setGenerationId(generation.generationId).
                 setMemberId(generation.memberId).
                 setRetentionTime(OffsetCommitRequest.DEFAULT_RETENTION_TIME);
 
         log.trace("Sending OffsetCommit request with {} to coordinator {}", offsets, coordinator);
-
+        /**
+         * 发送 OffsetCommitRequest 请求，并注册响应处理器
+         */
         return client.send(coordinator, builder)
                 .compose(new OffsetCommitResponseHandler(offsets));
     }

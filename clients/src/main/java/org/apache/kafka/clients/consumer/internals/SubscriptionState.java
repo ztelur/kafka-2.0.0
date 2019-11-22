@@ -55,6 +55,11 @@ public class SubscriptionState {
             "Subscription to topics, partitions and pattern are mutually exclusive";
 
     private enum SubscriptionType {
+        /**
+         * 按照指定的 topic 的名字进行订阅，自动分配分区
+         * 按照正则匹配 topic 名称进行订阅，自动分配分区
+         * 用户手动指定消费的 topic 以及分区
+         */
         NONE, AUTO_TOPICS, AUTO_PATTERN, USER_ASSIGNED
     }
 
@@ -104,14 +109,23 @@ public class SubscriptionState {
             throw new IllegalStateException(SUBSCRIPTION_EXCEPTION_MESSAGE);
     }
 
+    /**
+     *
+     * @param topics
+     * @param listener
+     */
     public void subscribe(Set<String> topics, ConsumerRebalanceListener listener) {
         if (listener == null)
             throw new IllegalArgumentException("RebalanceListener cannot be null");
-
+        /**
+         * 设置 topic 订阅模式为 AUTO_TOPICS
+         */
         setSubscriptionType(SubscriptionType.AUTO_TOPICS);
 
         this.rebalanceListener = listener;
-
+        /**
+         * 更新本地缓存的订阅的信息
+         */
         changeSubscription(topics);
     }
 
