@@ -24,10 +24,25 @@ import java.util.HashMap;
  */
 public enum ConsumerGroupState {
     UNKNOWN("Unknown"),
+    /**
+     * 表示 group 正在准备执行分区再分配操作。
+     */
     PREPARING_REBALANCE("PreparingRebalance"),
+    /**
+     * 表示 group 正在等待 leader 消费者的分区分配结果
+     */
     COMPLETING_REBALANCE("CompletingRebalance"),
+    /**
+     * 表示 group 处于正常运行状态。
+     */
     STABLE("Stable"),
+    /**
+     * 表示 group 名下已经没有消费者，且对应的元数据已经（或正在）被删除。
+     */
     DEAD("Dead"),
+    /**
+     * 表示 group 名下已经没有消费者，并且正在等待记录的所有 offset 元数据过期。
+     */
     EMPTY("Empty");
 
     private final static HashMap<String, ConsumerGroupState> NAME_TO_ENUM;

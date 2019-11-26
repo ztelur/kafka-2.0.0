@@ -171,11 +171,20 @@ class KafkaApis(val requestChannel: RequestChannel,
     val correlationId = request.header.correlationId
     val leaderAndIsrRequest = request.body[LeaderAndIsrRequest]
 
+    /**
+      * 完成 GroupCoordinator 的迁移操作
+      * @param updatedLeaders
+      * @param updatedFollowers
+      */
     def onLeadershipChange(updatedLeaders: Iterable[Partition], updatedFollowers: Iterable[Partition]) {
       // for each new leader or follower, call coordinator to handle consumer group migration.
       // this callback is invoked under the replica state change lock to ensure proper order of
       // leadership changes
       updatedLeaders.foreach { partition =>
+
+        /**
+          * 仅处理 offset topic，当 broker 节点维护 offset topic 分区的 leader 副本时回调执行
+          */
         if (partition.topic == GROUP_METADATA_TOPIC_NAME)
           groupCoordinator.handleGroupImmigration(partition.partitionId)
         else if (partition.topic == TRANSACTION_STATE_TOPIC_NAME)
@@ -183,6 +192,10 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
 
       updatedFollowers.foreach { partition =>
+
+        /**
+          *  仅处理 offset topic，当 broker 节点维护 offset topic 分区的 follower 副本时回调执行
+          */
         if (partition.topic == GROUP_METADATA_TOPIC_NAME)
           groupCoordinator.handleGroupEmigration(partition.partitionId)
         else if (partition.topic == TRANSACTION_STATE_TOPIC_NAME)
@@ -1289,6 +1302,9 @@ class KafkaApis(val requestChannel: RequestChannel,
   }
 
   def handleListGroupsRequest(request: RequestChannel.Request) {
+    /**
+      * 权限验证
+      */
     if (!authorize(request.session, Describe, Resource.ClusterResource)) {
       sendResponseMaybeThrottle(request, requestThrottleMs =>
         request.body[ListGroupsRequest].getErrorResponse(requestThrottleMs, Errors.CLUSTER_AUTHORIZATION_FAILED.exception))
@@ -1300,6 +1316,10 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
   }
 
+  /**
+    * 处理JoinGroupRequest请求。
+    * @param request
+    */
   def handleJoinGroupRequest(request: RequestChannel.Request) {
     val joinGroupRequest = request.body[JoinGroupRequest]
 

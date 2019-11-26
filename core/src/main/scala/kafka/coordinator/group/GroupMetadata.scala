@@ -242,15 +242,32 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     state = groupState
   }
 
+  /**
+    * 确定最终的分区分配策略，简单来说就是从消费者都支持的分区分配策略中投票选举一个得票最高的策略作为最终策略
+    * @return
+    */
   def selectProtocol: String = {
     if (members.isEmpty)
       throw new IllegalStateException("Cannot select protocol for empty group")
 
     // select the protocol for this group which is supported by all members
+    /**
+      * 计算所有消费者都支持的分区分配策略
+      */
     val candidates = candidateProtocols
 
     // let each member vote for one of the protocols and choose the one with the most votes
+    /**
+      * 选择所有消费者都支持的协议作为候选协议集合
+      * 每个消费者都会通过 vote 方法进行投票（为支持的协议中的第一个协议投一票），
+      * 最终选择投票最多的分区分配策略
+      */
     val votes: List[(String, Int)] = allMemberMetadata
+
+      /**
+        * MemberMetadata#vote 方法的投票策略实际上就是从消费者自身支持的分区分配策略和
+        * group 名下所有消费者都支持的分区分配策略中选择第 1 个进行投票
+        */
       .map(_.vote(candidates))
       .groupBy(identity)
       .mapValues(_.size)
@@ -270,10 +287,17 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     members.isEmpty || (memberProtocols & candidateProtocols).nonEmpty
   }
 
+  /**
+    * 该方法会依据 group 名下是否存在消费者将 group 切换成相应的状态，如果名下存在消费者还会确定最终的分区分配策略。
+    */
   def initNextGeneration() = {
     assert(notYetRejoinedMembers == List.empty[MemberMetadata])
     if (members.nonEmpty) {
       generationId += 1
+
+      /**
+        * 基于投票的方式选择一个所有消费者都支持的分区分配策略
+        */
       protocol = Some(selectProtocol)
       transitionTo(CompletingRebalance)
     } else {
