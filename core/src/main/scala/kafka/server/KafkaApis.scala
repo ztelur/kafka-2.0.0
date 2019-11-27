@@ -290,7 +290,10 @@ class KafkaApis(val requestChannel: RequestChannel,
 
   /**
    * Handle an offset commit request
-   */
+   * 消费者在完成对指定 offset 的消费之后，会基于配置和相应的场景以 OffsetCommitRequest
+    * 请求的方式向服务端提交该 offset 值。服务端在接收到
+    * OffsetCommitRequest 请求之后，需要为每个消费者记录对应 topic 分区的消费位置。
+    */
   def handleOffsetCommitRequest(request: RequestChannel.Request) {
     val header = request.header
     val offsetCommitRequest = request.body[OffsetCommitRequest]
@@ -1155,6 +1158,17 @@ class KafkaApis(val requestChannel: RequestChannel,
 
   /**
    * Handle an offset fetch request
+    *
+    * 当完成执行分区再分配操作之后，消费者一般会被重新分配新的分区，
+    * 此时消费者需要向集群发送 OffsetFetchRequest 请求以获取对应 topic 分区上次消费者的 offset 值，
+    * 并从该位置继续消费，以防止消息的重复消费或遗漏消费。
+    *
+    *
+    *
+    *
+    *
+    * 该方法会对请求的 topic 分区执行权限校验，如果校验通过则会依据请求中指定的版本号决定是从 ZK 还是 offset topic 中获取目标 topic 分区的 offset 位置信息。目前新版本的 kafka 为了避免 ZK 压力对于服务可用性的影响，
+    * 已经默认使用 offset topic 取代 ZK 记录消费者消费的 offset 位置信息，所以本小节仅介绍基于 offset topic 的 OffsetFetchRequest 请求处理过程。
    */
   def handleOffsetFetchRequest(request: RequestChannel.Request) {
     val header = request.header
@@ -1166,9 +1180,15 @@ class KafkaApis(val requestChannel: RequestChannel,
     def createResponse(requestThrottleMs: Int): AbstractResponse = {
       val offsetFetchResponse =
         // reject the request if not authorized to the group
+      /**
+        * 判断是否有权限
+        */
         if (!authorize(request.session, Describe, Resource(Group, offsetFetchRequest.groupId, LITERAL)))
           offsetFetchRequest.getErrorResponse(requestThrottleMs, Errors.GROUP_AUTHORIZATION_FAILED)
         else {
+          /**
+            * version 0 从 Zookeeper中读取offset信息
+            */
           if (header.apiVersion == 0) {
             val (authorizedPartitions, unauthorizedPartitions) = offsetFetchRequest.partitions.asScala
               .partition(authorizeTopicDescribe)
@@ -1198,6 +1218,9 @@ class KafkaApis(val requestChannel: RequestChannel,
             val unauthorizedPartitionData = unauthorizedPartitions.map(_ -> OffsetFetchResponse.UNAUTHORIZED_PARTITION).toMap
             new OffsetFetchResponse(requestThrottleMs, Errors.NONE, (authorizedPartitionData ++ unauthorizedPartitionData).asJava)
           } else {
+            /**
+              * 从 kafka 的 offset topic 读取信息
+              */
             // versions 1 and above read offsets from Kafka
             if (offsetFetchRequest.isAllPartitions) {
               val (error, allPartitionData) = groupCoordinator.handleFetchOffsets(offsetFetchRequest.groupId)
@@ -1428,6 +1451,11 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
   }
 
+  /**
+    * 用于处理 LeaveGroupRequest 请求，该方法首先会对消费者执行权限校验，
+    * 并在权限校验通过的前提下委托 GroupCoordinator 处理相应的离线策略
+    * @param request
+    */
   def handleLeaveGroupRequest(request: RequestChannel.Request) {
     val leaveGroupRequest = request.body[LeaveGroupRequest]
 

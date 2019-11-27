@@ -333,11 +333,22 @@ class GroupCoordinator(val brokerId: Int, // 所属的 broker 节点的 ID
     }
   }
 
+  /**
+    * 处理来自 leader 消费者的 SyncGroupRequest 请求，以获取 leader 消费者基于服务端确定的分区分配策略为当前 group 名下消费者分配分区的结果信息
+    * @param groupId
+    * @param generation
+    * @param memberId
+    * @param groupAssignment
+    * @param responseCallback
+    */
   def handleSyncGroup(groupId: String,
                       generation: Int,
                       memberId: String,
                       groupAssignment: Map[String, Array[Byte]],
                       responseCallback: SyncCallback): Unit = {
+    /**
+      * 首先会校验 GroupCoordinator 实例的运行状态
+      */
     validateGroupStatus(groupId, ApiKeys.SYNC_GROUP) match {
       case Some(error) if error == Errors.COORDINATOR_LOAD_IN_PROGRESS =>
         // The coordinator is loading, which means we've lost the state of the active rebalance and the
@@ -413,7 +424,16 @@ class GroupCoordinator(val brokerId: Int, // 所属的 broker 节点的 ID
     }
   }
 
+  /**
+    * 处理相应的离线策略
+    * @param groupId
+    * @param memberId
+    * @param responseCallback
+    */
   def handleLeaveGroup(groupId: String, memberId: String, responseCallback: Errors => Unit): Unit = {
+    /**
+      * 处理各种状态
+      */
     validateGroupStatus(groupId, ApiKeys.LEAVE_GROUP).foreach { error =>
       responseCallback(error)
       return
@@ -433,8 +453,16 @@ class GroupCoordinator(val brokerId: Int, // 所属的 broker 节点的 ID
             responseCallback(Errors.UNKNOWN_MEMBER_ID)
           } else {
             val member = group.get(memberId)
+
+            /**
+              * 设置 MemberMetadata#isLeaving 为 true，并尝试完成对应的 DelayedHeartbeat 延时任务
+              */
             removeHeartbeatForLeavingMember(group, member)
             debug(s"Member ${member.memberId} in group ${group.groupId} has left, removing it from the group")
+
+            /**
+              * 从 group 元数据信息中移除对应的 MemberMetadata 对象，并切换状态
+              */
             removeMemberAndUpdateGroup(group, member)
             responseCallback(Errors.NONE)
           }
@@ -571,6 +599,17 @@ class GroupCoordinator(val brokerId: Int, // 所属的 broker 节点的 ID
     }
   }
 
+  /**
+    * 该方法首先会校验 GroupCoordinator 的状态，确保能够正常处理当前 OffsetCommitRequest 请求，
+    * 并在允许的条件下调用 GroupCoordinator#doCommitOffsets 方法将
+    * offset 消费位置信息封装成消息追加到 offset topic
+    *
+     * @param groupId
+    * @param memberId
+    * @param generationId
+    * @param offsetMetadata
+    * @param responseCallback
+    */
   def handleCommitOffsets(groupId: String,
                           memberId: String,
                           generationId: Int,
@@ -606,6 +645,16 @@ class GroupCoordinator(val brokerId: Int, // 所属的 broker 节点的 ID
     groupManager.scheduleHandleTxnCompletion(producerId, offsetsPartitions.map(_.partition).toSet, isCommit)
   }
 
+  /**
+    * 将 offset 消费位置信息封装成消息追加到 offset topic
+    * @param group
+    * @param memberId
+    * @param generationId
+    * @param producerId
+    * @param producerEpoch
+    * @param offsetMetadata
+    * @param responseCallback
+    */
   private def doCommitOffsets(group: GroupMetadata,
                               memberId: String,
                               generationId: Int,
@@ -615,18 +664,36 @@ class GroupCoordinator(val brokerId: Int, // 所属的 broker 节点的 ID
                               responseCallback: immutable.Map[TopicPartition, Errors] => Unit) {
     group.inLock {
       if (group.is(Dead)) {
+        /**
+          * 目标 group 已经失效，直接响应错误码
+          */
         responseCallback(offsetMetadata.mapValues(_ => Errors.UNKNOWN_MEMBER_ID))
       } else if ((generationId < 0 && group.is(Empty)) || (producerId != NO_PRODUCER_ID)) {
         // The group is only using Kafka to store offsets.
         // Also, for transactional offset commits we don't need to validate group membership and the generation.
+        /**
+          * 目标 group 的信息不是由 kafka 维护，而仅仅依赖于 kafka 记录 offset 消费信息
+          */
         groupManager.storeOffsets(group, memberId, offsetMetadata, responseCallback, producerId, producerEpoch)
       } else if (group.is(CompletingRebalance)) {
+        /**
+          * 目标 group 目前正在执行分区再分配操作
+          */
         responseCallback(offsetMetadata.mapValues(_ => Errors.REBALANCE_IN_PROGRESS))
       } else if (!group.has(memberId)) {
+        /**
+          * 目标 group 并不包含当前消费者
+          */
         responseCallback(offsetMetadata.mapValues(_ => Errors.UNKNOWN_MEMBER_ID))
       } else if (generationId != group.generationId) {
+        /**
+          * 目标 group 年代信息不一致
+          */
         responseCallback(offsetMetadata.mapValues(_ => Errors.ILLEGAL_GENERATION))
       } else {
+        /**
+          * 将记录 offset 信息的消息追加到对应的 offset topic 对应分区中
+          */
         val member = group.get(memberId)
         completeAndScheduleNextHeartbeatExpiration(group, member)
         groupManager.storeOffsets(group, memberId, offsetMetadata, responseCallback)
@@ -634,12 +701,26 @@ class GroupCoordinator(val brokerId: Int, // 所属的 broker 节点的 ID
     }
   }
 
+  /**
+    * 读取 offset 信息
+    * @param groupId
+    * @param partitions
+    * @return
+    */
   def handleFetchOffsets(groupId: String, partitions: Option[Seq[TopicPartition]] = None):
   (Errors, Map[TopicPartition, OffsetFetchResponse.PartitionData]) = {
 
     validateGroupStatus(groupId, ApiKeys.OFFSET_FETCH) match {
       case Some(error) => error -> Map.empty
+
+      /**
+        * 当前 GroupCoordinator 实例正在加载该 group 对应的 offset topic 分区信息
+        */
       case None =>
+
+        /**
+          * 返回指定 topic 分区集合对应的最近一次提交的 offset 位置信息
+          */
         // return offsets blindly regardless the current group state since the group may be using
         // Kafka commit storage without automatic group management
         (Errors.NONE, groupManager.getOffsets(groupId, partitions))

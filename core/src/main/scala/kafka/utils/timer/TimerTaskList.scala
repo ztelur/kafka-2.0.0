@@ -24,16 +24,28 @@ import org.apache.kafka.common.utils.Time
 
 import scala.math._
 
+/**
+  * 时间格，采用环形双向链表实现，记录位于同一个时间格中的延时任务
+  *
+  *
+  * 时间轮的一格（即时间格），在实现上采用双向链表实现，用于封装位于特定时间区间范围内的所有的延时任务
+  * @param taskCounter
+  */
 @threadsafe
 private[timer] class TimerTaskList(taskCounter: AtomicInteger) extends Delayed {
 
   // TimerTaskList forms a doubly linked cyclic list using a dummy root entry
   // root.next points to the head
   // root.prev points to the tail
+  /**
+    * 根结点
+    */
   private[this] val root = new TimerTaskEntry(null, -1)
   root.next = root
   root.prev = root
-
+  /**
+    * 记录当前时间格对应时间区间上界 记录整个分层时间轮中持有的延时任务总数
+    */
   private[this] val expiration = new AtomicLong(-1L)
 
   // Set the bucket's expiration time
@@ -135,8 +147,18 @@ private[timer] class TimerTaskList(taskCounter: AtomicInteger) extends Delayed {
 private[timer] class TimerTaskEntry(val timerTask: TimerTask, val expirationMs: Long) extends Ordered[TimerTaskEntry] {
 
   @volatile
+
+  /**
+    * 所属时间格
+    */
   var list: TimerTaskList = null
+  /**
+    * 后置指针
+    */
   var next: TimerTaskEntry = null
+  /**
+    * 前置指针
+    */
   var prev: TimerTaskEntry = null
 
   // if this timerTask is already held by an existing timer task entry,

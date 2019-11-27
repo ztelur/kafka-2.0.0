@@ -505,21 +505,40 @@ class GroupMetadataManager(brokerId: Int, // 所属 broker 节点 ID
    * The most important guarantee that this API provides is that it should never return a stale offset. i.e., it either
    * returns the current offset or it begins to sync the cache from the log (and returns an error code).
    */
+  /**
+    * 获取offset信息
+    * @param groupId
+    * @param topicPartitionsOpt
+    * @return
+    */
   def getOffsets(groupId: String, topicPartitionsOpt: Option[Seq[TopicPartition]]): Map[TopicPartition, OffsetFetchResponse.PartitionData] = {
     trace("Getting offsets of %s for group %s.".format(topicPartitionsOpt.getOrElse("all partitions"), groupId))
+    /**
+      * 获取 group 对应的元数据信息
+      */
     val group = groupMetadataCache.get(groupId)
     if (group == null) {
+      /**
+        *  group 对应的元数据信息不存在，则统一返回 offset 为 -1
+        */
       topicPartitionsOpt.getOrElse(Seq.empty[TopicPartition]).map { topicPartition =>
         (topicPartition, new OffsetFetchResponse.PartitionData(OffsetFetchResponse.INVALID_OFFSET, "", Errors.NONE))
       }.toMap
     } else {
       group.inLock {
         if (group.is(Dead)) {
+          /**
+            * 对应的 group 名下已经没有消费者，并且元数据信息已经被删除
+            */
           topicPartitionsOpt.getOrElse(Seq.empty[TopicPartition]).map { topicPartition =>
             (topicPartition, new OffsetFetchResponse.PartitionData(OffsetFetchResponse.INVALID_OFFSET, "", Errors.NONE))
           }.toMap
         } else {
           topicPartitionsOpt match {
+            /**
+              * 请求未指定 topic 分区，表示请求 group 名下
+              * 全部 topic 分区对应的最近一次提交的 offset 值
+              */
             case None =>
               // Return offsets for all partitions owned by this consumer group. (this only applies to consumers
               // that commit offsets to Kafka.)
@@ -527,12 +546,19 @@ class GroupMetadataManager(brokerId: Int, // 所属 broker 节点 ID
                 topicPartition -> new OffsetFetchResponse.PartitionData(offsetAndMetadata.offset, offsetAndMetadata.metadata, Errors.NONE)
               }
 
+            /**
+              * 查找指定 topic 分区集合对应的最近一次提交的 offset 值
+              */
             case Some(topicPartitions) =>
               topicPartitions.map { topicPartition =>
                 val partitionData = group.offset(topicPartition) match {
                   case None =>
                     new OffsetFetchResponse.PartitionData(OffsetFetchResponse.INVALID_OFFSET, "", Errors.NONE)
                   case Some(offsetAndMetadata) =>
+
+                    /**
+                      * 缓存了每个 topic 分区最近一次提交的 offset 位置信息和用户自定义数据
+                      */
                     new OffsetFetchResponse.PartitionData(offsetAndMetadata.offset, offsetAndMetadata.metadata, Errors.NONE)
                 }
                 topicPartition -> partitionData

@@ -16,10 +16,18 @@
  */
 package kafka.utils.timer
 
+/**
+  * 特质类型，用于描述延时任务。
+  */
 trait TimerTask extends Runnable {
-
+  /**
+    * 当前任务的延迟时长（单位：毫秒
+    */
   val delayMs: Long // timestamp in millisecond
-
+  /**
+    * 封装当前定时任务的链表节点
+    * 用于封装当前延时任务并记录到时间格中，属于延时任务与时间格之间建立关系的桥梁
+    */
   private[this] var timerTaskEntry: TimerTaskEntry = null
 
   def cancel(): Unit = {
